@@ -1,0 +1,252 @@
+name: release
+
+# Tag driven. Pushing `v1.2.3` builds every target, verifies the tag against the
+# manifest, and publishes a GitHub release with checksummed archives:
+#
+#   git tag v0.1.0 && git push origin v0.1.0
+#
+# `workflow_dispatch` runs the identical build without publishing, so a release
+# can be rehearsed before the tag exists.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  # A tag that disagrees with Cargo.toml would ship a binary whose
+  # `ttk --version` lies. Catch that before anything is built.
+  verify:
+    name: verify tag
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.check.outputs.version }}
+      prerelease: ${{ steps.check.outputs.prerelease }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: check
+        shell: bash
+        run: |
+          set -euo pipefail
+          manifest="$(grep -m1 -E '^version *= *"' Cargo.toml | sed -E 's/.*"([^"]+)".*/\1/')"
+          echo "manifest version: $manifest"
+          echo "version=$manifest" >> "$GITHUB_OUTPUT"
+
+          prerelease=true
+          if [ "${GITHUB_REF_TYPE:-}" = "tag" ]; then
+            tag="${GITHUB_REF_NAME#v}"
+            echo "tag version:      $tag"
+            if [ "$tag" != "$manifest" ]; then
+              echo "::error::tag v${tag} does not match the workspace version ${manifest} in Cargo.toml"
+              exit 1
+            fi
+            # A hyphen marks a pre-release: v1.2.3-rc1, v1.2.3-beta.2
+            case "$tag" in
+              *-*) prerelease=true ;;
+              *)   prerelease=false ;;
+            esac
+          fi
+          echo "prerelease=${prerelease}" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: build ${{ matrix.target }}
+    needs: verify
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            archive: tar.gz
+            test: true
+          # Statically linked: runs on any glibc version, and on Alpine.
+          # Host tests are already covered by the gnu job on the same runner.
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+            archive: tar.gz
+            test: false
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            archive: zip
+            test: true
+          # macOS and aarch64 are deliberately absent: the project claims Linux
+          # and Windows support, and shipping a binary nobody has run is exactly
+          # the kind of unverified promise this project avoids. Adding them is a
+          # two line change here — once CI covers them as well.
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: install musl tooling
+        if: endsWith(matrix.target, '-musl')
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      # The released commit is tested on the platform it is released for, not
+      # only on whatever last ran on main.
+      - name: test
+        if: matrix.test
+        run: cargo test --locked --all-features
+
+      - name: build
+        run: cargo build --locked --release --target ${{ matrix.target }}
+
+      # Proves the artifact actually starts before it is offered for download.
+      # The musl binary is static, so it runs on the glibc host too.
+      - name: smoke test
+        shell: bash
+        run: |
+          set -euo pipefail
+          bin="target/${{ matrix.target }}/release/ttk"
+          if [ -f "${bin}.exe" ]; then
+            bin="${bin}.exe"
+          fi
+          "$bin" --version
+          "$bin" help > /dev/null
+
+      - name: package
+        shell: bash
+        run: |
+          set -euo pipefail
+          name="ttk-${{ needs.verify.outputs.version }}-${{ matrix.target }}"
+          mkdir -p "dist/${name}"
+          cp README.md "dist/${name}/"
+
+          if [ "${{ matrix.archive }}" = "zip" ]; then
+            cp "target/${{ matrix.target }}/release/ttk.exe" "dist/${name}/"
+            (cd dist && 7z a -tzip "${name}.zip" "${name}" > /dev/null)
+            file="${name}.zip"
+          else
+            cp "target/${{ matrix.target }}/release/ttk" "dist/${name}/"
+            tar -C dist -czf "dist/${name}.tar.gz" "${name}"
+            file="${name}.tar.gz"
+          fi
+
+          # git bash ships coreutils, so one command covers every runner. It
+          # marks binary mode as `hash *file` on Windows but `hash  file` on
+          # Linux; normalise so SHA256SUMS reads identically everywhere.
+          (cd dist && sha256sum "$file" | sed 's/ \*/  /' > "${file}.sha256")
+          cat "dist/${file}.sha256"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ttk-${{ matrix.target }}
+          path: |
+            dist/*.tar.gz
+            dist/*.zip
+            dist/*.sha256
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: publish release
+    needs: [verify, build]
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # `generate-notes` compares against the previous tag.
+          fetch-depth: 0
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: assemble release notes
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd artifacts
+          ls -la
+
+          # One combined checksum file; the per file ones would only clutter
+          # the release page.
+          cat ./*.sha256 > SHA256SUMS
+          rm -f ./*.sha256
+          cd ..
+
+          {
+            cat <<'HEADER'
+          ## Install
+
+          Download the archive for your platform, unpack it, and let `ttk` set
+          itself up:
+
+          ```bash
+          ./ttk install
+          ```
+
+          That adds `ttk` to your user `PATH` and teaches Claude Code / Codex to
+          route commands through `ttk run --`. It never overwrites your
+          instruction files, and it never uses `setx` to touch `PATH`.
+
+          Verify your download:
+
+          ```bash
+          sha256sum -c SHA256SUMS --ignore-missing
+          ```
+
+          | file | sha256 |
+          |---|---|
+          HEADER
+
+            while read -r sum file; do
+              # Belt and braces: drop a binary mode marker if one slipped in.
+              printf '| `%s` | `%s` |\n' "${file#\*}" "$sum"
+            done < artifacts/SHA256SUMS
+
+            printf '\n'
+          } > notes.md
+
+          # Fetch the generated changelog explicitly instead of relying on
+          # `--generate-notes` interacting with `--notes-file`.
+          if ! gh api \
+              --method POST \
+              "repos/${GITHUB_REPOSITORY}/releases/generate-notes" \
+              -f tag_name="${GITHUB_REF_NAME}" \
+              --jq '.body' >> notes.md; then
+            # Never fail silently: the release still ships, but the missing
+            # changelog is visible in the Actions summary.
+            echo "::warning::could not generate the changelog; releasing without it"
+            echo "_Changelog unavailable._" >> notes.md
+          fi
+
+          cat notes.md
+
+      # `gh` ships on the runner, so no third party action ever sees the token.
+      - name: create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PRERELEASE: ${{ needs.verify.outputs.prerelease }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          flags=()
+          if [ "$PRERELEASE" = "true" ]; then
+            flags+=(--prerelease)
+          fi
+          gh release create "$GITHUB_REF_NAME" \
+            --title "ThanosTokenKiller ${{ needs.verify.outputs.version }}" \
+            --notes-file notes.md \
+            "${flags[@]}" \
+            artifacts/*

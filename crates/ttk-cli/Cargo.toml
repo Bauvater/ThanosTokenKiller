@@ -1,0 +1,28 @@
+[package]
+name = "ttk-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+description = "ThanosTokenKiller command line interface."
+
+[[bin]]
+name = "ttk"
+path = "src/main.rs"
+
+[dependencies]
+ttk-core.workspace = true
+ttk-store.workspace = true
+ttk-compilers.workspace = true
+clap.workspace = true
+dirs.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+tempfile = "3"

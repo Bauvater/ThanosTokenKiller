@@ -1,0 +1,7 @@
+/target
+**/*.rs.bk
+# Captured tool output never belongs in version control.
+.ttk/blobs/
+.ttk/events/
+.ttk/index.redb*
+/docs

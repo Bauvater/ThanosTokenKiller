@@ -1,0 +1,44 @@
+[workspace]
+resolver = "3"
+members = ["crates/ttk-core", "crates/ttk-store", "crates/ttk-compilers", "crates/ttk-cli"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.90"
+license = "MIT"
+repository = "https://github.com/Bauvater/ThanosTokenKiller"
+homepage = "https://github.com/Bauvater/ThanosTokenKiller"
+description = "ThanosTokenKiller - the only Claude Code token killer you'll ever need!"
+readme = "README.md"
+keywords = ["tokens", "llm", "claude", "agents", "compression"]
+categories = ["command-line-utilities", "development-tools"]
+
+[workspace.dependencies]
+ttk-core = { path = "crates/ttk-core", version = "0.1.0" }
+ttk-store = { path = "crates/ttk-store", version = "0.1.0" }
+ttk-compilers = { path = "crates/ttk-compilers", version = "0.1.0" }
+
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+toml = "0.9"
+blake3 = "1"
+zstd = "0.13"
+redb = "4"
+clap = { version = "4", features = ["derive", "wrap_help"] }
+regex = "1"
+thiserror = "2"
+anyhow = "1"
+dirs = "6"
+time = { version = "0.3", features = ["formatting", "parsing", "macros", "serde-well-known"] }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+# NOTE: deliberately NOT panic = "abort": the quality firewall uses
+# catch_unwind to turn a compiler panic into a safe pass-through.
+strip = "symbols"
+
+[profile.bench]
+inherits = "release"
