@@ -44,7 +44,10 @@ pub fn hash_string(s: &str) -> String {
 /// Short, human friendly form of a hash for reports (`blake3:1a2b3c4d`).
 pub fn short_hash(hash: &str) -> String {
     match hash.split_once(':') {
-        Some((algo, hex)) => format!("{algo}:{}", &hex[..hex.len().min(8)]),
+        Some((algo, hex)) => {
+            let short = &hex[..hex.len().min(8)];
+            format!("{algo}:{short}")
+        }
         None => hash.chars().take(8).collect(),
     }
 }

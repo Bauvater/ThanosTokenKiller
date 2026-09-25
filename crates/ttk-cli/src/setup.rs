@@ -127,9 +127,22 @@ pub fn run(ctx: &Context, args: &SetupArgs) -> Result<i32> {
     let mut written = Vec::new();
     if !agents.is_empty() {
         for target in install::targets(&agents, Scope::Project, &root) {
+            // Already in the global file, which the agent reads everywhere:
+            // a project copy would only be read twice.
+            if install::redundant_with_global(&target) {
+                outln!(
+                    "  {} {}",
+                    ui::paint(ui::DIM, format!("{:<18}", "already global")),
+                    target.agent.global_path().unwrap_or_default().display()
+                );
+                continue;
+            }
             let block = crate::guide::agent_block_for(target.agent, compact);
             let action = install::apply(&target, &block, false)?;
             written.push((target.path.clone(), action));
+            if let Some(dup) = install::remove_home_duplicate(&target, false)? {
+                written.push((dup, Action::DuplicateRemoved));
+            }
         }
         for (path, action) in &written {
             outln!(

@@ -359,11 +359,29 @@ fn install(args: &Args) -> i32 {
     }
     rule();
 
-    // The agent: optional, and the one question after the install proper.
+    // An upgrade brings every instruction block that is already installed up
+    // to date, without asking: a stale block teaches the agent commands that
+    // may no longer exist. Duplicates are removed on the way.
     say!();
+    let refreshed = quiet(&ttk, &["__installer", "refresh-agents"]).unwrap_or_default();
+    let refreshed: Vec<(&str, &str)> = refreshed
+        .lines()
+        .filter_map(|l| l.split_once('\t'))
+        .collect();
+    for (action, path) in &refreshed {
+        say!(
+            "   {} {} {}",
+            paint(OK, "✓"),
+            format!("{action:<19}"),
+            paint(DIM, path)
+        );
+    }
+    let already_set_up = refreshed.iter().any(|(a, _)| *a != "duplicate removed");
+
+    // A first install asks once; an upgrade of a set-up agent never does.
     let agent = match args.agent {
-        Some(a) => a,
-        None if args.yes => false,
+        Some(a) => a && !already_set_up,
+        None if already_set_up || args.yes => false,
         None => {
             say!(
                 "   {}",

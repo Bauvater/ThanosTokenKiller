@@ -317,7 +317,8 @@ pub fn rule_id_for(scope: &Scope, template: &Pattern, action: &Action) -> String
         Action::Keep => key.push_str("\u{1}keep"),
     }
     let hex = blake3::hash(key.as_bytes()).to_hex();
-    format!("flt_{}", &hex[..10])
+    let short = &hex[..10];
+    format!("flt_{short}")
 }
 
 // ---------------------------------------------------------------------------

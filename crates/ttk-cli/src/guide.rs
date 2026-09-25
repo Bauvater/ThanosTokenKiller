@@ -208,8 +208,8 @@ tells you exactly how much was left out.
    see more of it.
 4. `<secret:…>` placeholders mean a credential was detected and kept local.
    Never try to unmask one; work with the placeholder.
-5. `ttk stats` shows this workspace, `ttk stats --global` shows every project
-   at once; `ttk explain <event>` shows what a compiler did and why.
+5. `ttk gain` shows what ttk has saved across every project, `ttk stats` this
+   workspace in detail; `ttk explain <event>` shows what a compiler did and why.
 
 {LEARNING_BLOCK}
 

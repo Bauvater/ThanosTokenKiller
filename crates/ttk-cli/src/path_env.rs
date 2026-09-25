@@ -758,7 +758,8 @@ mod platform {
         if text[stop..].starts_with('\n') {
             stop += 1;
         }
-        let updated = format!("{}{}", &text[..start], &text[stop..]);
+        let (head, tail) = (&text[..start], &text[stop..]);
+        let updated = format!("{head}{tail}");
         std::fs::write(&profile, updated)?;
         Ok(true)
     }

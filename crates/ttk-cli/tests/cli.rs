@@ -36,6 +36,8 @@ impl Sandbox {
             // …nor their real learned-filter rules, nor their global ledger.
             .env("TTK_USER_RULES", self.dir.path().join("user-rules.json"))
             .env("TTK_GLOBAL_HOME", self.dir.path().join("global"))
+            // …nor the instruction files in their real home directory.
+            .env("TTK_AGENT_HOME", self.dir.path().join("agent-home"))
             // Colour is decided per test, not by whether CI has a terminal.
             .env("NO_COLOR", "1")
             .env_remove("TTK_MODE")
@@ -113,6 +115,69 @@ fn help_prints_the_cheat_sheet_and_the_savings_table() {
             "`ttk help --all` is missing `{needle}`"
         );
     }
+}
+
+#[test]
+fn the_agent_block_exists_once_and_updates_replace_it() {
+    const BEGIN: &str = "<!-- BEGIN ThanosTokenKiller (ttk)";
+    let s = Sandbox::new();
+    let home = s.dir.path().join("agent-home");
+    let global = home.join(".claude").join("CLAUDE.md");
+    let home_level = home.join("CLAUDE.md");
+    std::fs::create_dir_all(global.parent().expect("parent")).expect("mkdir");
+
+    // The state this has to repair: an outdated global block, and a second
+    // copy in ~/CLAUDE.md that Claude Code reads in every project as well.
+    let stale = format!(
+        "# my rules\r\n\r\n{BEGIN} — managed block, do not edit by hand -->\r\n\
+         ## ThanosTokenKiller (`ttk`)\r\nold instructions\r\n<!-- END ThanosTokenKiller (ttk) -->\r\n"
+    );
+    std::fs::write(&global, &stale).expect("write");
+    std::fs::write(
+        &home_level,
+        format!("# home notes\n\n{}", stale.replace("\r\n", "\n")),
+    )
+    .expect("write");
+
+    let o = s.ttk(&["__installer", "refresh-agents"]);
+    assert!(o.status.success(), "{}", stderr(&o));
+    let text = std::fs::read_to_string(&global).expect("read");
+    assert_eq!(text.matches(BEGIN).count(), 1, "{text}");
+    assert!(!text.contains("old instructions"), "the update replaced it");
+    assert!(text.contains("ttk gain"), "with the current instructions");
+    assert!(
+        text.starts_with("# my rules\r\n"),
+        "the user's text and CRLF stay"
+    );
+    let home_text = std::fs::read_to_string(&home_level).expect("read");
+    assert!(
+        !home_text.contains(BEGIN),
+        "the duplicate is gone: {home_text}"
+    );
+    assert!(home_text.contains("# home notes"));
+
+    // Running it again changes nothing.
+    let o = s.ttk(&["__installer", "refresh-agents"]);
+    assert!(stdout(&o).contains("already up to date"), "{}", stdout(&o));
+    assert_eq!(std::fs::read_to_string(&global).expect("read"), text);
+
+    // A project install without an explicit scope does not add a second copy
+    // when the global file already has one…
+    let o = s.ttk(&["install", "--target", "claude", "--yes", "--no-path"]);
+    assert!(o.status.success(), "{}", stderr(&o));
+    assert!(!s.dir.path().join("CLAUDE.md").exists(), "{}", stdout(&o));
+    // …but a shared repository can still ask for its own.
+    let o = s.ttk(&[
+        "install",
+        "--target",
+        "claude",
+        "--scope",
+        "project",
+        "--yes",
+        "--no-path",
+    ]);
+    assert!(o.status.success(), "{}", stderr(&o));
+    assert!(s.dir.path().join("CLAUDE.md").exists());
 }
 
 #[test]

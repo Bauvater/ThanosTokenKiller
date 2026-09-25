@@ -339,6 +339,8 @@ enum InstallerAction {
     PathRemove,
     /// Replace every older ttk on the PATH with this one.
     TakeOver,
+    /// Update every installed agent block to this version; remove duplicates.
+    RefreshAgents,
 }
 
 #[derive(Subcommand)]
@@ -572,6 +574,7 @@ fn main() {
             InstallerAction::PathAdd => commands::InstallerHook::PathAdd,
             InstallerAction::PathRemove => commands::InstallerHook::PathRemove,
             InstallerAction::TakeOver => commands::InstallerHook::TakeOver,
+            InstallerAction::RefreshAgents => commands::InstallerHook::RefreshAgents,
         }),
         Command::Inspect { event } => commands::inspect(&ctx, &event),
         Command::Explain { event } => commands::explain(&ctx, &event),

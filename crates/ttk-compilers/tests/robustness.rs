@@ -106,7 +106,7 @@ fn every_candidate_is_valid_token_ir_or_valid_json() {
             ir_ok || json_ok,
             "compiler {} emitted something unparsable for {:?}:\n{}",
             candidate.transformer,
-            &text.chars().take(40).collect::<String>(),
+            text.chars().take(40).collect::<String>(),
             candidate.output
         );
     }

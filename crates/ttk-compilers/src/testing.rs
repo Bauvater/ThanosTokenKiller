@@ -200,7 +200,8 @@ impl Compiler for PytestCompiler {
                 run.counts.push((key, n));
             }
             if let Some(d) = PYTEST_DURATION_RE.captures(line) {
-                run.duration = Some(format!("{}s", &d[1]));
+                let secs = &d[1];
+                run.duration = Some(format!("{secs}s"));
             }
         }
         run.status = Some(

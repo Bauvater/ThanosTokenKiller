@@ -203,6 +203,12 @@ pub fn installer_hook(action: InstallerHook) -> Result<i32> {
                 outln!("warn {line}");
             }
         }
+        // `<action>\t<path>` per touched file; nothing when no block exists.
+        InstallerHook::RefreshAgents => {
+            for (path, action) in crate::install::refresh_installed(false)? {
+                outln!("{}\t{}", action.as_str(), path.display());
+            }
+        }
     }
     Ok(0)
 }
@@ -212,6 +218,7 @@ pub enum InstallerHook {
     PathAdd,
     PathRemove,
     TakeOver,
+    RefreshAgents,
 }
 
 /// Write the agent instruction block into `CLAUDE.md` / `AGENTS.md`.
@@ -252,6 +259,7 @@ pub fn install(
         },
     };
 
+    let explicit_scope = scope.is_some();
     let scope = match scope {
         Some(s) => Scope::parse(s)?,
         None if target.is_some() => Scope::Project,
@@ -287,7 +295,36 @@ pub fn install(
         None
     };
 
-    let targets = targets(&agents, scope, &root);
+    let mut targets = targets(&agents, scope, &root);
+    // The agent reads its global file in every project. Unless a project file
+    // was asked for by name (a shared repository wants its own copy), a second
+    // block there would only be read twice.
+    let mut already_global = Vec::new();
+    if !explicit_scope {
+        targets.retain(|t| {
+            let redundant = crate::install::redundant_with_global(t);
+            if redundant {
+                already_global.push(t.path.clone());
+            }
+            !redundant
+        });
+    }
+    if targets.is_empty() && !already_global.is_empty() {
+        if !ctx.json {
+            outln!(
+                "{}",
+                ui::ok("ttk is already in your global instruction file, which every project reads")
+            );
+            outln!(
+                "{}",
+                ui::detail(
+                    "nothing written, so the agent does not read it twice; \
+                            pass --scope project to add a copy for a shared repository"
+                )
+            );
+        }
+        return Ok(0);
+    }
     if targets.is_empty() {
         return Err(Error::other(
             "no instruction file to write (no home directory for the global scope?)",
@@ -329,6 +366,16 @@ pub fn install(
         let block = crate::guide::agent_block_for(t.agent, compact);
         let action = apply(t, &block, dry_run)?;
         results.push((t.clone(), action));
+        if let Some(dup) = crate::install::remove_home_duplicate(t, dry_run)? {
+            results.push((
+                crate::install::Target {
+                    agent: t.agent,
+                    path: dup,
+                    global: false,
+                },
+                Action::DuplicateRemoved,
+            ));
+        }
     }
 
     // PATH comes last: a failure here must not undo the agent files that were
@@ -401,7 +448,7 @@ pub fn install(
         if path_changed {
             outln!("Open a new terminal so the updated PATH takes effect.");
         }
-        outln!("Verify with:  ttk doctor      See the savings with:  ttk stats");
+        outln!("Verify with:  ttk doctor      See the savings with:  ttk gain");
     }
     Ok(0)
 }
