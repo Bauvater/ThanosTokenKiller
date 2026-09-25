@@ -1021,6 +1021,74 @@ fn a_lesson_taught_from_the_last_run_fires_on_the_next_one() {
     );
 }
 
+/// After a lesson, the next run must show the *filtered* output, not
+/// "[repeat] identical to" the unfiltered run before it: that pointer would
+/// hand the agent back exactly the noise it just taught ttk to remove.
+///
+/// The kept part is long on purpose, so a pointer is always the smaller
+/// candidate and only the rule that forbids it can make this test pass. (The
+/// test above sits on a knife edge between the two, which is how this bug
+/// showed up on one CI runner and not on another.)
+#[test]
+fn a_new_lesson_is_never_answered_with_a_pointer_to_the_noisy_run() {
+    let s = Sandbox::new();
+    let mut text = String::from(
+        "npm WARN deprecated inflight@1.0.6: This module is not supported anymore\n\
+         npm WARN deprecated glob@7.2.3: This module is not supported anymore\n",
+    );
+    for i in 0..30 {
+        text.push_str(&format!(
+            "package-{i:02} resolved from the registry cache\n"
+        ));
+    }
+    let noisy = s.write("out.txt", &text);
+    let show: Vec<String> = if cfg!(windows) {
+        vec![
+            "run".into(),
+            "--".into(),
+            "cmd".into(),
+            "/C".into(),
+            format!("type {}", path_arg(&noisy)),
+        ]
+    } else {
+        vec![
+            "run".into(),
+            "--".into(),
+            "sh".into(),
+            "-c".into(),
+            format!("cat {}", path_arg(&noisy)),
+        ]
+    };
+    let argv: Vec<&str> = show.iter().map(String::as_str).collect();
+    assert!(s.ttk(&argv).status.success());
+
+    let lesson = text
+        .replacen(
+            "npm WARN deprecated inflight",
+            "<filter-trash>\nnpm WARN deprecated inflight",
+            1,
+        )
+        .replacen(
+            "anymore\npackage-00",
+            "anymore\n</filter-trash>\npackage-00",
+            1,
+        );
+    let lesson = s.write("lesson.txt", &lesson);
+    let taught = s.ttk(&["learn", "--last", "--file", &path_arg(&lesson)]);
+    assert!(taught.status.success(), "{}", stderr(&taught));
+
+    // The first run after the lesson: the filtered text, in full.
+    let out = stdout(&s.ttk(&argv));
+    assert!(!out.contains("[repeat]"), "pointed at the noisy run: {out}");
+    assert!(!out.contains("deprecated"), "{out}");
+    assert!(out.contains("package-29 resolved"), "{out}");
+
+    // From then on the agent has seen the filtered view, so pointing at it is
+    // exactly right again.
+    let again = stdout(&s.ttk(&argv));
+    assert!(again.contains("[repeat]"), "{again}");
+}
+
 // ---------------------------------------------------------------------------
 // Block rules
 // ---------------------------------------------------------------------------

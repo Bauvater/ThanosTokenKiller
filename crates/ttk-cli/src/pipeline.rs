@@ -114,6 +114,14 @@ fn merge_invariants(
 }
 
 /// Run the full pipeline for one piece of content.
+/// The learned rules that fired on a run, as one comparable string.
+fn filter_key(filtered: &ttk_learn::Filtered) -> String {
+    let mut ids: Vec<&str> = filtered.by_rule.iter().map(|h| h.id.as_str()).collect();
+    ids.sort_unstable();
+    ids.dedup();
+    ids.join(",")
+}
+
 pub fn process(
     workspace: &Workspace,
     config: &Config,
@@ -233,8 +241,20 @@ pub fn process(
     //    that survives wins. None of them is trusted to judge itself, and
     //    every one of them carries the error-shaped lines forward — which is
     //    why the firewall can accept a pointer at all.
+    // "The same as last time" is only true of the same *view*. Once a rule
+    // has been learned, the previous run was delivered unfiltered, and a
+    // pointer to it would hand the agent back exactly the noise the rule was
+    // taught to remove. So an earlier run only counts when the same learned
+    // rules fired on it.
+    let filter_key = filtered.as_ref().map(filter_key).unwrap_or_default();
+    if !filter_key.is_empty() {
+        event
+            .metadata
+            .insert(delta::FILTER_KEY.to_string(), json!(filter_key));
+    }
     let command_line = input.command.map(CommandContext::command_line);
-    let previous = delta::previous_run(workspace, command_line.as_deref(), event.timestamp_millis);
+    let previous = delta::previous_run(workspace, command_line.as_deref(), event.timestamp_millis)
+        .filter(|p| p.filter_key == filter_key);
 
     let mut candidates: Vec<Candidate> = Vec::new();
     if let Some(prev) = &previous {

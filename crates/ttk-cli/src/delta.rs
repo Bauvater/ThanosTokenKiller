@@ -52,7 +52,13 @@ pub struct Previous {
     pub content: Option<String>,
     /// How many earlier runs of this command produced this same output.
     pub repeats: u64,
+    /// The learned rules that fired on that run ([`FILTER_KEY`]); empty when
+    /// none did. A run is only comparable with one filtered the same way.
+    pub filter_key: String,
 }
+
+/// Event metadata key: the learned rules that fired on a run.
+pub const FILTER_KEY: &str = "filter_key";
 
 impl Previous {
     fn age_millis(&self, now: u64) -> u64 {
@@ -114,6 +120,12 @@ pub fn previous_run(
         source_hash: event.source_hash.clone(),
         content,
         repeats,
+        filter_key: event
+            .metadata
+            .get(FILTER_KEY)
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string(),
     })
 }
 
@@ -253,6 +265,7 @@ mod tests {
             source_hash: ttk_core::hash_string(content),
             content: Some(content.to_string()),
             repeats: 0,
+            filter_key: String::new(),
         }
     }
 
