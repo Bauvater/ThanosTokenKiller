@@ -121,6 +121,7 @@ pub struct Config {
     pub capsules: CapsuleConfig,
     pub quality: QualityConfig,
     pub context: ContextConfig,
+    pub learning: LearningConfig,
     pub security: SecurityConfig,
     pub telemetry: TelemetryConfig,
     pub limits: LimitsConfig,
@@ -163,6 +164,38 @@ pub struct ContextConfig {
     pub delta_context: bool,
 }
 
+/// Learned filters — the rules an agent teaches with `<filter-trash>` tags.
+///
+/// See `docs/learned-filters.md`. Every default here is the conservative one:
+/// filtering is on because a taught rule is an explicit instruction, but the
+/// guards that keep a rule from growing teeth are not negotiable by accident.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct LearningConfig {
+    /// Apply learned rules to captured output.
+    pub enabled: bool,
+    /// Also read the user level rule file, not just the project's.
+    pub use_user_rules: bool,
+    /// Never remove a line the invariant extractor considers critical, even if
+    /// a rule matches it. Turning this off is a loaded gun.
+    pub protect_errors: bool,
+    /// A template needs at least this many literal (non-placeholder) tokens.
+    pub min_literal_tokens: u32,
+    /// …and at least this many literal characters in total.
+    pub min_literal_chars: u32,
+    /// Highest share of a template that may be placeholders, 0.0 – 1.0.
+    pub max_placeholder_ratio: f64,
+    /// Learn *block* rules: one rule for a whole run of lines that no single
+    /// line rule could describe, which is what an ASCII banner looks like.
+    pub learn_blocks: bool,
+    /// A block rule needs at least this many literal characters across all of
+    /// its lines. Higher than `min_literal_chars` on purpose: a block removes
+    /// several lines at once, so it has to be harder to earn.
+    pub min_block_literal_chars: u32,
+    /// Update `hits` / `tokens_saved` on the rules that fired.
+    pub record_hits: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct SecurityConfig {
@@ -202,6 +235,7 @@ impl Default for Config {
             capsules: CapsuleConfig::default(),
             quality: QualityConfig::default(),
             context: ContextConfig::default(),
+            learning: LearningConfig::default(),
             security: SecurityConfig::default(),
             telemetry: TelemetryConfig::default(),
             limits: LimitsConfig::default(),
@@ -241,6 +275,22 @@ impl Default for ContextConfig {
             minimum_output_reserve_tokens: 2048,
             deduplicate: true,
             delta_context: true,
+        }
+    }
+}
+
+impl Default for LearningConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            use_user_rules: true,
+            protect_errors: true,
+            min_literal_tokens: 2,
+            min_literal_chars: 8,
+            max_placeholder_ratio: 0.5,
+            learn_blocks: true,
+            min_block_literal_chars: 24,
+            record_hits: true,
         }
     }
 }
@@ -296,6 +346,25 @@ impl Config {
         if !(0.0..=1.0).contains(&self.quality.min_relative_gain) {
             return Err(Error::Config(
                 "quality.min_relative_gain must be between 0.0 and 1.0".into(),
+            ));
+        }
+        if !(0.0..=1.0).contains(&self.learning.max_placeholder_ratio) {
+            return Err(Error::Config(
+                "learning.max_placeholder_ratio must be between 0.0 and 1.0".into(),
+            ));
+        }
+        if self.learning.min_literal_tokens == 0 || self.learning.min_literal_chars == 0 {
+            return Err(Error::Config(
+                "learning.min_literal_tokens and learning.min_literal_chars must be at least 1:                  a template with no literal content matches everything"
+                    .into(),
+            ));
+        }
+        if self.learning.learn_blocks
+            && self.learning.min_block_literal_chars < self.learning.min_literal_chars
+        {
+            return Err(Error::Config(
+                "learning.min_block_literal_chars must be at least learning.min_literal_chars:                  a block removes several lines at once, so it cannot be easier to earn than a                  rule that removes one"
+                    .into(),
             ));
         }
         if self.capsules.encryption {
@@ -358,10 +427,33 @@ pub struct LoadedConfig {
     pub project_root: Option<PathBuf>,
 }
 
+/// Name of the directory inside [`global_home`] that holds the global filters.
+pub const GLOBAL_FILTERS_DIR: &str = "filters";
+
+/// The one global ttk folder (`%APPDATA%\ttk`, `~/.config/ttk`).
+///
+/// Everything that is not tied to a single project lives here: the user
+/// configuration, the global filters that apply in every project, and the
+/// usage ledger that `ttk gain` totals. `TTK_GLOBAL_HOME` moves all of it at
+/// once, which is what the test suite uses to stay off the real folder.
+pub fn global_home() -> Option<PathBuf> {
+    if let Ok(p) = std::env::var("TTK_GLOBAL_HOME")
+        && !p.trim().is_empty()
+    {
+        return Some(PathBuf::from(p));
+    }
+    dirs::config_dir().map(|d| d.join("ttk"))
+}
+
+/// `<global home>/filters`: every rule file in it applies to every project.
+pub fn global_filters_dir() -> Option<PathBuf> {
+    global_home().map(|d| d.join(GLOBAL_FILTERS_DIR))
+}
+
 /// User level config file path (`%APPDATA%/ttk/config.toml`,
 /// `~/.config/ttk/config.toml`).
 pub fn user_config_path() -> Option<PathBuf> {
-    dirs::config_dir().map(|d| d.join("ttk").join("config.toml"))
+    global_home().map(|d| d.join("config.toml"))
 }
 
 /// Walk upwards from `start` looking for a project marker.
@@ -516,6 +608,57 @@ mod tests {
     fn unknown_keys_are_rejected() {
         let err = Config::from_toml("mdoe = \"safe\"").expect_err("typo must fail");
         assert!(err.to_string().contains("mdoe"), "{err}");
+    }
+
+    #[test]
+    fn learning_defaults_are_on_but_guarded() {
+        let c = Config::default();
+        assert!(c.learning.enabled);
+        assert!(c.learning.protect_errors);
+        assert!(c.learning.min_literal_tokens >= 2);
+    }
+
+    #[test]
+    fn a_toothless_guard_is_rejected() {
+        assert!(
+            Config::from_toml(
+                "[learning]
+min_literal_tokens = 0"
+            )
+            .is_err()
+        );
+        assert!(
+            Config::from_toml(
+                "[learning]
+max_placeholder_ratio = 1.5"
+            )
+            .is_err()
+        );
+        assert!(
+            Config::from_toml(
+                "[learning]
+protect_errors = false"
+            )
+            .is_ok()
+        );
+        // A block removes several lines at once, so it may never be cheaper to
+        // earn than a rule that removes one.
+        assert!(
+            Config::from_toml(
+                "[learning]
+min_block_literal_chars = 4"
+            )
+            .is_err()
+        );
+        assert!(
+            Config::from_toml(
+                "[learning]
+learn_blocks = false
+min_block_literal_chars = 4"
+            )
+            .is_ok(),
+            "the bound is meaningless when blocks are off"
+        );
     }
 
     #[test]

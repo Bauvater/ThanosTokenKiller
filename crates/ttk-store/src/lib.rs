@@ -8,7 +8,13 @@
 //!   blobs/          content addressed, zstd compressed originals
 //!   index.redb      capsule metadata
 //!   events/         one JSONL file per session
+//!   learned-filters.json  rules an agent taught, meant to be committed
 //! ```
+//!
+//! One thing deliberately lives *outside* every project: the global usage
+//! ledger in [`usage`]. "How much has ttk saved me, everywhere" is the number
+//! people actually want, and answering it by walking twenty `.ttk` directories
+//! is how a statistic becomes useless.
 //!
 //! No project's data is ever mixed with another's: the workspace is resolved
 //! from the project root and every path is derived from it.
@@ -16,6 +22,7 @@
 pub mod blob;
 pub mod capsule;
 pub mod events;
+pub mod usage;
 
 use std::path::{Path, PathBuf};
 
@@ -25,6 +32,7 @@ use ttk_core::config::Config;
 pub use blob::{BlobRef, BlobStore, Compression};
 pub use capsule::{Capsule, CapsuleStore, GcStats, LEVEL_RAW, NewCapsule, StoreStats};
 pub use events::EventLog;
+pub use usage::{GlobalUsage, ProjectUsage, RunRecord, UsageLedger};
 
 /// Directory name used inside a project.
 pub const WORKSPACE_DIR: &str = ".ttk";

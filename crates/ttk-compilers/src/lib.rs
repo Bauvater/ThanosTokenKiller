@@ -126,6 +126,29 @@ impl CommandContext {
     pub fn succeeded(&self) -> bool {
         self.exit_code == Some(0) && self.signal.is_none()
     }
+
+    /// The program name, lowercased and stripped of a path and `.exe`.
+    ///
+    /// This is the identity a learned filter's scope is matched against, so it
+    /// lives on the context rather than on one consumer of it.
+    pub fn program(&self) -> Option<String> {
+        let first = self.argv.first()?;
+        let base = first
+            .rsplit(['/', '\\'])
+            .next()
+            .unwrap_or(first)
+            .to_ascii_lowercase();
+        Some(base.strip_suffix(".exe").unwrap_or(&base).to_string())
+    }
+
+    /// Sub command, e.g. `status` for `git status --short`.
+    pub fn subcommand(&self) -> Option<&str> {
+        self.argv
+            .iter()
+            .skip(1)
+            .find(|a| !a.starts_with('-'))
+            .map(String::as_str)
+    }
 }
 
 pub trait Compiler: Send + Sync {

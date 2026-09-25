@@ -258,7 +258,11 @@ fn truncate_on_char_boundary(text: &str, max: usize) -> &str {
 
 static CRITICAL_LINE_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
-        r"(?i)\b(error|failed|failure|fail:|panic|panicked|exception|traceback|assert\w*|fatal|cannot|denied|refused|timed?[ _-]?out|expected|actual|exit(?:ed)?[ _-]?(?:code|status))\b",
+        // `err!` is the odd one out and it earns its place: npm, yarn and pnpm
+        // all print `npm ERR!` rather than the word "error", so without it the
+        // single most common failure line in the JavaScript world is invisible
+        // to every guard that asks "is this evidence?".
+        r"(?i)(\b(error|failed|failure|fail:|panic|panicked|exception|traceback|assert\w*|fatal|cannot|denied|refused|timed?[ _-]?out|expected|actual|exit(?:ed)?[ _-]?(?:code|status))\b|\bERR!)",
     )
     .expect("static regex")
 });
@@ -292,6 +296,20 @@ pub fn violations(declared: &[Invariant], transformed: &str) -> Vec<Invariant> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `npm ERR!` is a failure line that contains no word this pass would
+    /// otherwise recognise.
+    #[test]
+    fn npm_style_error_markers_count_as_critical() {
+        let text = "npm ERR! code ELIFECYCLE
+added 412 packages in 9s
+";
+        let critical = critical_regions(text);
+        assert!(critical.contains("npm ERR!"), "{critical}");
+        assert!(!critical.contains("added 412"), "{critical}");
+        // …and an ordinary word that merely starts the same way is not.
+        assert!(critical_regions("erratic behaviour is fine here").is_empty());
+    }
 
     #[test]
     fn extracts_line_refs_and_error_types() {

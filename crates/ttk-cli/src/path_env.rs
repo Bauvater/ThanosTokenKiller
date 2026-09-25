@@ -113,6 +113,192 @@ pub fn ensure_on_path(dir: &Path, dry_run: bool) -> Result<PathOutcome> {
     platform::add(dir)
 }
 
+/// Take `dir` back out of the user's PATH. `true` when it was there.
+///
+/// The uninstaller's half of [`ensure_on_path`]: every other entry is left
+/// exactly as it was.
+pub fn remove_from_path(dir: &Path) -> Result<bool> {
+    if std::env::var(SKIP_ENV_VAR).is_ok_and(|v| v.trim() == "1") {
+        return Ok(false);
+    }
+    platform::remove(dir)
+}
+
+/// The file name of the ttk binary on this platform.
+pub const BINARY_NAME: &str = if cfg!(windows) { "ttk.exe" } else { "ttk" };
+
+/// The `ttk` a new terminal would start: the first match on the process PATH.
+pub fn first_on_path() -> Option<PathBuf> {
+    let path = std::env::var_os("PATH")?;
+    std::env::split_paths(&path)
+        .map(|d| d.join(BINARY_NAME))
+        .find(|p| p.is_file())
+}
+
+/// Do two paths name the same file?
+pub fn same_file(a: &Path, b: &Path) -> bool {
+    match (a.canonicalize(), b.canonicalize()) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => normalise(&a.display().to_string()) == normalise(&b.display().to_string()),
+    }
+}
+
+/// What [`take_over`] did, one line per action, for the installer to show.
+#[derive(Debug, Default)]
+pub struct Takeover {
+    /// Things that were changed.
+    pub done: Vec<String>,
+    /// Things that could not be fixed without the user.
+    pub warnings: Vec<String>,
+}
+
+/// Make `dir` the one and only `ttk` on the user's PATH.
+///
+/// An upgrade that leaves an older copy earlier on the PATH has not upgraded
+/// anything: the terminal keeps starting the old binary. So every other
+/// directory on the user PATH that holds a `ttk` binary is dealt with:
+///
+/// * a directory that exists for ttk alone (its path names ttk, such as an old
+///   install directory or a `target\release` of this repository) is taken off
+///   the PATH;
+/// * a shared directory (`~/.cargo/bin`, …) keeps its PATH entry, and only the
+///   stale binary in it is removed.
+///
+/// Then `dir` goes to the *front* of the user PATH, and the PATH a new
+/// terminal will get is checked to really start this copy. A copy on the
+/// system PATH needs administrator rights to change, so it is reported, never
+/// touched.
+pub fn take_over(dir: &Path) -> Result<Takeover> {
+    let mut report = Takeover::default();
+    if std::env::var(SKIP_ENV_VAR).is_ok_and(|v| v.trim() == "1") {
+        report
+            .warnings
+            .push(format!("{SKIP_ENV_VAR}=1: PATH left alone"));
+        return Ok(report);
+    }
+    let user_path = platform::persisted_user_path().unwrap_or_default();
+    let separator = if cfg!(windows) { ';' } else { ':' };
+    let user_entries: Vec<&str> = user_path
+        .split(separator)
+        .filter(|e| !e.trim().is_empty())
+        .collect();
+
+    for entry in &user_entries {
+        let expanded = PathBuf::from(expand_vars(entry.trim()));
+        if same_dir(&expanded, dir) {
+            continue;
+        }
+        let stale = expanded.join(BINARY_NAME);
+        if !stale.is_file() {
+            continue;
+        }
+        if owned_by_ttk(&expanded) {
+            match platform::remove_entry(entry.trim()) {
+                Ok(true) => report
+                    .done
+                    .push(format!("removed old PATH entry {}", expanded.display())),
+                Ok(false) => {}
+                Err(e) => report.warnings.push(format!(
+                    "could not remove {} from PATH: {e}",
+                    expanded.display()
+                )),
+            }
+        } else {
+            match retire_binary(&stale) {
+                Ok(()) => report
+                    .done
+                    .push(format!("removed old copy {}", stale.display())),
+                Err(e) => report.warnings.push(format!(
+                    "an old copy at {} is still in the way: {e}",
+                    stale.display()
+                )),
+            }
+        }
+    }
+
+    match platform::put_first(dir)? {
+        true => report
+            .done
+            .push(format!("{} is first on your PATH", dir.display())),
+        false => report
+            .done
+            .push(format!("{} was already first on your PATH", dir.display())),
+    }
+
+    // The proof: what a terminal opened from now on will actually start.
+    if let Some(fresh) = platform::fresh_path() {
+        let winner = fresh
+            .split(separator)
+            .filter(|e| !e.trim().is_empty())
+            .map(|e| PathBuf::from(expand_vars(e.trim())).join(BINARY_NAME))
+            .find(|p| p.is_file());
+        match winner {
+            Some(p) if same_file(&p, &dir.join(BINARY_NAME)) => {}
+            // Only the system PATH can still be in front of the user's now,
+            // and that one needs administrator rights to change.
+            Some(p) => report.warnings.push(format!(
+                "a new terminal would still start {} (system PATH); \
+                 remove it there, which needs administrator rights",
+                p.display()
+            )),
+            None => report
+                .warnings
+                .push("a new terminal will not find ttk on its PATH".to_string()),
+        }
+    }
+    Ok(report)
+}
+
+/// Does this directory exist only for ttk? Judged by its path, which is all
+/// that can be known without guessing.
+fn owned_by_ttk(dir: &Path) -> bool {
+    let lower = dir.display().to_string().to_ascii_lowercase();
+    dir.file_name()
+        .is_some_and(|n| n.to_string_lossy().eq_ignore_ascii_case("ttk"))
+        || lower.contains("thanostokenkiller")
+        || lower.contains(&format!(
+            "{}ttk{}",
+            std::path::MAIN_SEPARATOR,
+            std::path::MAIN_SEPARATOR
+        ))
+}
+
+/// Remove an old binary. A running one cannot be deleted on Windows but can
+/// be renamed, and the renamed file is no longer found as `ttk`.
+fn retire_binary(path: &Path) -> std::io::Result<()> {
+    if std::fs::remove_file(path).is_ok() {
+        return Ok(());
+    }
+    let old = path.with_extension("exe.old");
+    let _ = std::fs::remove_file(&old);
+    std::fs::rename(path, &old)
+}
+
+fn same_dir(a: &Path, b: &Path) -> bool {
+    normalise(&a.display().to_string()) == normalise(&b.display().to_string())
+}
+
+/// Expand `%VAR%` references the way the Windows shell does; anything that
+/// is not a set variable stays as written.
+fn expand_vars(s: &str) -> String {
+    let mut out = String::new();
+    let mut rest = s;
+    while let Some(start) = rest.find('%') {
+        let Some(len) = rest[start + 1..].find('%') else {
+            break;
+        };
+        let name = &rest[start + 1..start + 1 + len];
+        out.push_str(&rest[..start]);
+        match std::env::var(name) {
+            Ok(v) if !name.is_empty() => out.push_str(&v),
+            _ => out.push_str(&rest[start..start + len + 2]),
+        }
+        rest = &rest[start + len + 2..];
+    }
+    out.push_str(rest);
+    out
+}
+
 /// Where a directory stands relative to the user's PATH.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PathPresence {
@@ -169,7 +355,11 @@ mod platform {
         r#"param(
     [Parameter(Mandatory=$true)][string]$Dir,
     # Only the test suite overrides this; production always edits Environment.
-    [string]$KeyPath = 'Environment'
+    [string]$KeyPath = 'Environment',
+    # Take the directory out instead of adding it (the uninstaller).
+    [switch]$Remove,
+    # Make it the first entry, moving it if it is already further back.
+    [switch]$Front
 )
 $ErrorActionPreference = 'Stop'
 
@@ -190,6 +380,22 @@ $parts = @()
 if ($raw) { $parts = @($raw -split ';' | Where-Object { $_.Trim() -ne '' }) }
 
 $target = $Dir.TrimEnd('\')
+if ($Remove) {
+    $kept = @($parts | Where-Object { $_.Trim().TrimEnd('\') -ine $target })
+    if ($kept.Count -eq $parts.Count) { Write-Output 'absent'; exit 0 }
+    $key.SetValue('Path', ($kept -join ';'), $kind)
+    $key.Close()
+    Write-Output 'removed'
+    exit 0
+}
+if ($Front) {
+    if ($parts.Count -gt 0 -and $parts[0].Trim().TrimEnd('\') -ieq $target) { Write-Output 'already-first'; exit 0 }
+    $rest = @($parts | Where-Object { $_.Trim().TrimEnd('\') -ine $target })
+    $key.SetValue('Path', ((@($Dir) + $rest) -join ';'), $kind)
+    $key.Close()
+    Write-Output 'moved-first'
+    exit 0
+}
 foreach ($p in $parts) {
     if ($p.Trim().TrimEnd('\') -ieq $target) { Write-Output 'already-present'; exit 0 }
 }
@@ -210,22 +416,7 @@ Write-Output 'added'
     /// Only called when the process PATH does not already contain the
     /// directory, so the extra process spawn stays off the hot path.
     pub(super) fn persisted_contains(dir: &Path) -> Option<bool> {
-        let output = Command::new("powershell")
-            .args([
-                "-NoProfile",
-                "-NonInteractive",
-                "-Command",
-                "$k=[Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Environment'); \
-                 if ($null -eq $k) { '' } else { \
-                 $k.GetValue('Path','',[Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames) }",
-            ])
-            .output()
-            .ok()?;
-        if !output.status.success() {
-            return None;
-        }
-        let value = String::from_utf8_lossy(&output.stdout);
-        Some(super::contains_dir(value.trim(), dir))
+        Some(super::contains_dir(&persisted_user_path()?, dir))
     }
 
     // `HWND_BROADCAST`, `WM_SETTINGCHANGE`, `SMTO_ABORTIFHUNG`.
@@ -301,7 +492,101 @@ Write-Output 'added'
     /// Run the registry script. `key_path` is `None` in production, meaning
     /// `HKCU\Environment`; the test suite passes a scratch key so the write
     /// path can be exercised without touching the real PATH.
+    /// Take `dir` out of the user PATH. `true` when it was there.
+    pub(super) fn remove(dir: &Path) -> Result<bool> {
+        let removed = remove_at(dir, None)?;
+        if removed {
+            broadcast_environment_change();
+        }
+        Ok(removed)
+    }
+
+    /// [`remove`] against `key_path` (`None` = `HKCU\Environment`).
+    pub(super) fn remove_at(dir: &Path, key_path: Option<&str>) -> Result<bool> {
+        Ok(invoke(dir, key_path, Mode::Remove)?.contains("removed"))
+    }
+
+    /// Remove one raw PATH entry, exactly as it is written in the registry.
+    pub(super) fn remove_entry(entry: &str) -> Result<bool> {
+        let removed = remove_at(Path::new(entry), None)?;
+        if removed {
+            broadcast_environment_change();
+        }
+        Ok(removed)
+    }
+
+    /// Put `dir` first on the user PATH. `true` when something changed.
+    pub(super) fn put_first(dir: &Path) -> Result<bool> {
+        let changed = put_first_at(dir, None)?;
+        if changed {
+            broadcast_environment_change();
+        }
+        Ok(changed)
+    }
+
+    pub(super) fn put_first_at(dir: &Path, key_path: Option<&str>) -> Result<bool> {
+        Ok(invoke(dir, key_path, Mode::Front)?.contains("moved-first"))
+    }
+
+    /// The PATH a terminal opened from now on gets: system entries first,
+    /// then the user's, expanded.
+    pub(super) fn fresh_path() -> Option<String> {
+        let output = Command::new("powershell")
+            .args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                "[Environment]::GetEnvironmentVariable('Path','Machine') + ';' + \
+                 [Environment]::GetEnvironmentVariable('Path','User')",
+            ])
+            .output()
+            .ok()?;
+        output
+            .status
+            .success()
+            .then(|| String::from_utf8_lossy(&output.stdout).trim().to_string())
+    }
+
+    /// The user PATH as stored, with `%VAR%` references unexpanded.
+    pub(super) fn persisted_user_path() -> Option<String> {
+        let output = Command::new("powershell")
+            .args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                "$k=[Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Environment'); \
+                 if ($null -eq $k) { '' } else { \
+                 $k.GetValue('Path','',[Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames) }",
+            ])
+            .output()
+            .ok()?;
+        output
+            .status
+            .success()
+            .then(|| String::from_utf8_lossy(&output.stdout).trim().to_string())
+    }
+
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum Mode {
+        Add,
+        Remove,
+        Front,
+    }
+
     pub(super) fn run_script(dir: &Path, key_path: Option<&str>) -> Result<PathOutcome> {
+        let stdout = invoke(dir, key_path, Mode::Add)?;
+        if stdout.contains("already-present") {
+            Ok(PathOutcome::AlreadyPresent)
+        } else {
+            // `add` replaces this once it knows whether the change could be
+            // broadcast to running applications.
+            Ok(PathOutcome::Added {
+                detail: "HKCU\\Environment".to_string(),
+            })
+        }
+    }
+
+    fn invoke(dir: &Path, key_path: Option<&str>, mode: Mode) -> Result<String> {
         let script_path = std::env::temp_dir().join(format!(
             "ttk-path-{}-{}.ps1",
             std::process::id(),
@@ -324,6 +609,15 @@ Write-Output 'added'
         if let Some(key) = key_path {
             command.arg("-KeyPath").arg(key);
         }
+        match mode {
+            Mode::Add => {}
+            Mode::Remove => {
+                command.arg("-Remove");
+            }
+            Mode::Front => {
+                command.arg("-Front");
+            }
+        }
         let output = command.output();
         let _ = std::fs::remove_file(&script_path);
 
@@ -344,16 +638,7 @@ Write-Output 'added'
             )));
         }
 
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        if stdout.contains("already-present") {
-            Ok(PathOutcome::AlreadyPresent)
-        } else {
-            // `add` replaces this once it knows whether the change could be
-            // broadcast to running applications.
-            Ok(PathOutcome::Added {
-                detail: "HKCU\\Environment".to_string(),
-            })
-        }
+        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
     }
 }
 
@@ -435,6 +720,47 @@ mod platform {
                 profile.display()
             ),
         })
+    }
+
+    /// The profile block is not a list of entries; nothing to read.
+    pub(super) fn persisted_user_path() -> Option<String> {
+        None
+    }
+
+    pub(super) fn fresh_path() -> Option<String> {
+        None
+    }
+
+    pub(super) fn remove_entry(_entry: &str) -> Result<bool> {
+        Ok(false)
+    }
+
+    /// A profile block appends; making it first is `add` on this platform.
+    pub(super) fn put_first(dir: &Path) -> Result<bool> {
+        Ok(matches!(add(dir)?, PathOutcome::Added { .. }))
+    }
+
+    /// Drop the managed block from the shell profile, if it names `dir`.
+    pub(super) fn remove(dir: &Path) -> Result<bool> {
+        let Some(profile) = profile_path() else {
+            return Ok(false);
+        };
+        let Ok(text) = std::fs::read_to_string(&profile) else {
+            return Ok(false);
+        };
+        let (Some(start), Some(end)) = (text.find(BEGIN), text.find(END)) else {
+            return Ok(false);
+        };
+        if end < start || !text[start..end].contains(&block_for(&profile, dir)) {
+            return Ok(false);
+        }
+        let mut stop = end + END.len();
+        if text[stop..].starts_with('\n') {
+            stop += 1;
+        }
+        let updated = format!("{}{}", &text[..start], &text[stop..]);
+        std::fs::write(&profile, updated)?;
+        Ok(true)
     }
 }
 
@@ -566,6 +892,34 @@ mod tests {
     }
 
     #[test]
+    fn variables_expand_like_the_shell_and_unknown_ones_survive() {
+        // SAFETY: test-local variable name, removed right after.
+        unsafe { std::env::set_var("TTK_TEST_EXPAND", r"C:\Users\me") };
+        assert_eq!(expand_vars(r"%TTK_TEST_EXPAND%\bin"), r"C:\Users\me\bin");
+        assert_eq!(
+            expand_vars(r"%TTK_TEST_NOT_SET_ANYWHERE%\x"),
+            r"%TTK_TEST_NOT_SET_ANYWHERE%\x"
+        );
+        assert_eq!(expand_vars("100% sure"), "100% sure");
+        assert_eq!(expand_vars("plain"), "plain");
+        unsafe { std::env::remove_var("TTK_TEST_EXPAND") };
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn only_directories_that_exist_for_ttk_are_taken_off_the_path() {
+        assert!(owned_by_ttk(Path::new(
+            r"C:\Users\me\Desktop\Projekte\ThanosTokenKiller\target\release"
+        )));
+        assert!(owned_by_ttk(Path::new(
+            r"C:\Users\me\AppData\Local\Programs\ttk"
+        )));
+        assert!(owned_by_ttk(Path::new(r"C:\tools\ttk\bin")));
+        assert!(!owned_by_ttk(Path::new(r"C:\Users\me\.cargo\bin")));
+        assert!(!owned_by_ttk(Path::new(r"C:\tools\attk")));
+    }
+
+    #[test]
     fn binary_dir_exists() {
         let dir = binary_dir().expect("binary dir");
         assert!(dir.is_dir(), "{}", dir.display());
@@ -639,6 +993,43 @@ mod tests {
         assert_eq!(second, PathOutcome::AlreadyPresent);
         let unchanged = ps(&read);
         assert_eq!(after, unchanged, "second run must not modify anything");
+
+        // 7. The uninstaller takes exactly that entry back out, and nothing else.
+        assert!(platform::remove_at(new_dir, Some(KEY)).expect("remove"));
+        let removed = ps(&read);
+        let (value, kind) = removed.rsplit_once('\n').expect("value and kind");
+        assert_eq!(value.trim(), seed, "only the added entry may go");
+        assert_eq!(kind.trim(), "ExpandString");
+        assert!(!platform::remove_at(new_dir, Some(KEY)).expect("remove again"));
+
+        // 8. Taking over: the directory goes to the front, exactly once.
+        assert!(platform::put_first_at(new_dir, Some(KEY)).expect("front"));
+        let (value, _) = ps(&read)
+            .rsplit_once('\n')
+            .map(|(v, k)| (v.to_string(), k.to_string()))
+            .expect("value");
+        assert_eq!(
+            value.trim(),
+            format!(r"C:\tools\ttk-write-path-test;{seed}")
+        );
+        assert!(!platform::put_first_at(new_dir, Some(KEY)).expect("front again"));
+        assert!(
+            platform::put_first_at(
+                Path::new(r"C:\some\reasonably\long\directory\number-07"),
+                Some(KEY)
+            )
+            .expect("move")
+        );
+        let (value, _) = ps(&read)
+            .rsplit_once('\n')
+            .map(|(v, k)| (v.to_string(), k.to_string()))
+            .expect("value");
+        assert!(value.starts_with(r"C:\some\reasonably\long\directory\number-07;C:\tools\ttk-write-path-test;%USERPROFILE%\bin"));
+        assert_eq!(
+            value.matches("number-07").count(),
+            1,
+            "moved, not duplicated"
+        );
 
         ps(&cleanup);
         assert!(

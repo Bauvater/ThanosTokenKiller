@@ -105,6 +105,12 @@ jobs:
       - name: build
         run: cargo build --locked --release --target ${{ matrix.target }}
 
+      # One double-clickable ttk-setup.exe with ttk.exe embedded in it.
+      - name: build the Windows installer
+        if: matrix.archive == 'zip'
+        shell: pwsh
+        run: ./scripts/build-installer.ps1 -Target ${{ matrix.target }}
+
       # Proves the artifact actually starts before it is offered for download.
       # The musl binary is static, so it runs on the glibc host too.
       - name: smoke test
@@ -142,12 +148,20 @@ jobs:
           (cd dist && sha256sum "$file" | sed 's/ \*/  /' > "${file}.sha256")
           cat "dist/${file}.sha256"
 
+          for setup in dist/ttk-setup-*.exe; do
+            [ -f "$setup" ] || continue
+            base="$(basename "$setup")"
+            (cd dist && sha256sum "$base" | sed 's/ \*/  /' > "${base}.sha256")
+            cat "dist/${base}.sha256"
+          done
+
       - uses: actions/upload-artifact@v4
         with:
           name: ttk-${{ matrix.target }}
           path: |
             dist/*.tar.gz
             dist/*.zip
+            dist/*.exe
             dist/*.sha256
           if-no-files-found: error
           retention-days: 7
@@ -189,7 +203,10 @@ jobs:
             cat <<'HEADER'
           ## Install
 
-          Download the archive for your platform, unpack it, and let `ttk` set
+          **Windows:** download `ttk-setup-*-x86_64-windows.exe` and double-click
+          it. No administrator rights; it uninstalls from Settings → Apps.
+
+          Or download the archive for your platform, unpack it, and let `ttk` set
           itself up:
 
           ```bash

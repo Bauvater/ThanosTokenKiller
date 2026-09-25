@@ -35,6 +35,23 @@ pub const CAPSULE_SCHEMA_VERSION: u32 = 1;
 
 const CAPSULES: TableDefinition<&str, &[u8]> = TableDefinition::new("capsules");
 const BY_HASH: TableDefinition<&str, &str> = TableDefinition::new("capsules_by_source_hash");
+/// `short handle -> source hash`. Deliberately not `-> id`: the handle is a
+/// property of the *content*, so the ownership check when allocating one is a
+/// direct comparison instead of a capsule load.
+const BY_SHORT: TableDefinition<&str, &str> = TableDefinition::new("capsules_by_short");
+
+/// Starting length of a short handle, in hex characters.
+///
+/// A full capsule id is `cap_` plus 26 base32 characters of timestamp and
+/// entropy. Random alphanumerics tokenise appallingly — that reference costs
+/// around thirteen tokens, and it is printed on *every* compiled output. On a
+/// `cargo test` that compiles down to 62 tokens, the pointer to the original is
+/// a fifth of the whole message. Five hex characters cost two or three tokens
+/// and are just as unambiguous inside one workspace.
+const SHORT_LEN: usize = 5;
+
+/// Longest a short handle grows before giving up and using the full id.
+const SHORT_MAX_LEN: usize = 12;
 
 /// Highest detail level. Always the untouched original.
 pub const LEVEL_RAW: u8 = 4;
@@ -43,6 +60,15 @@ pub const LEVEL_RAW: u8 = 4;
 pub struct Capsule {
     pub schema_version: u32,
     pub id: CapsuleId,
+    /// Short, unambiguous handle for this workspace: what compiled output
+    /// prints, and what `ttk retrieve` accepts. Derived from the content hash,
+    /// so identical output always gets the same handle — which is a useful
+    /// signal in its own right when a command is run twice.
+    ///
+    /// Empty on records written before short handles existed; those still
+    /// resolve by their full id.
+    #[serde(default)]
+    pub short: String,
     pub source_event: Option<EventId>,
     pub content_type: ContentType,
     /// Hash of the original content; also the blob key for level 4.
@@ -65,6 +91,15 @@ pub struct Capsule {
 }
 
 impl Capsule {
+    /// `cap://<short>` if this capsule has a short handle, else `cap://<id>`.
+    pub fn reference(&self) -> String {
+        if self.short.is_empty() {
+            format!("cap://{}", self.id)
+        } else {
+            format!("cap://{}", self.short)
+        }
+    }
+
     /// Best available rendering at or below `level`.
     pub fn level_text(&self, level: u8) -> Option<&str> {
         (0..=level.min(3))
@@ -197,6 +232,8 @@ impl CapsuleStore {
                 .map_err(|e| Error::storage(format!("open capsules table: {e}")))?;
             tx.open_table(BY_HASH)
                 .map_err(|e| Error::storage(format!("open index table: {e}")))?;
+            tx.open_table(BY_SHORT)
+                .map_err(|e| Error::storage(format!("open short index table: {e}")))?;
             tx.commit()
                 .map_err(|e| Error::storage(format!("index commit: {e}")))?;
         }
@@ -215,9 +252,11 @@ impl CapsuleStore {
     pub fn put(&self, new: NewCapsule) -> Result<Capsule> {
         let blob = self.blobs.put_str(&new.content)?;
         let now = ttk_core::ids::now_millis();
+        let short = self.allocate_short(&blob.hash)?;
         let capsule = Capsule {
             schema_version: CAPSULE_SCHEMA_VERSION,
             id: CapsuleId::new(),
+            short,
             source_event: new.source_event,
             content_type: new.content_type,
             source_hash: blob.hash.clone(),
@@ -239,6 +278,42 @@ impl CapsuleStore {
         };
         self.write_capsule(&capsule)?;
         Ok(capsule)
+    }
+
+    /// Pick the shortest unambiguous handle for this content.
+    ///
+    /// Derived from the content hash rather than the id, so re-running a
+    /// command that produces the same bytes yields the same handle. Grows by
+    /// two characters at a time on collision and falls back to the empty string
+    /// — meaning "use the full id" — rather than ever returning an ambiguous
+    /// one.
+    fn allocate_short(&self, source_hash: &str) -> Result<String> {
+        let hex = source_hash.strip_prefix("blake3:").unwrap_or(source_hash);
+        let tx = self
+            .db
+            .begin_read()
+            .map_err(|e| Error::storage(format!("read txn: {e}")))?;
+        let t = tx
+            .open_table(BY_SHORT)
+            .map_err(|e| Error::storage(format!("open short index: {e}")))?;
+
+        let mut len = SHORT_LEN;
+        while len <= SHORT_MAX_LEN.min(hex.len()) {
+            let candidate = &hex[..len];
+            match t
+                .get(candidate)
+                .map_err(|e| Error::storage(format!("get short: {e}")))?
+            {
+                // Free, or already pointing at this very content.
+                None => return Ok(candidate.to_string()),
+                Some(existing) if existing.value() == source_hash => {
+                    return Ok(candidate.to_string());
+                }
+                Some(_) => {}
+            }
+            len += 2;
+        }
+        Ok(String::new())
     }
 
     fn blobs_compression(&self) -> String {
@@ -264,14 +339,23 @@ impl CapsuleStore {
                 .map_err(|e| Error::storage(format!("open table: {e}")))?;
             h.insert(capsule.source_hash.as_str(), capsule.id.as_str())
                 .map_err(|e| Error::storage(format!("insert hash index: {e}")))?;
+            if !capsule.short.is_empty() {
+                let mut sh = tx
+                    .open_table(BY_SHORT)
+                    .map_err(|e| Error::storage(format!("open short table: {e}")))?;
+                sh.insert(capsule.short.as_str(), capsule.source_hash.as_str())
+                    .map_err(|e| Error::storage(format!("insert short index: {e}")))?;
+            }
         }
         tx.commit()
             .map_err(|e| Error::storage(format!("commit: {e}")))?;
         Ok(())
     }
 
-    /// Look up a capsule by id. Accepts `cap://<id>` and bare ids, and
-    /// resolves an unambiguous id prefix.
+    /// Look up a capsule by id, short handle or unambiguous id prefix.
+    ///
+    /// `cap://` is accepted and ignored, so anything printed in compiled output
+    /// can be pasted straight back.
     pub fn get(&self, id: &str) -> Result<Capsule> {
         let id = id.trim().trim_start_matches("cap://");
         let tx = self
@@ -284,6 +368,29 @@ impl CapsuleStore {
         if let Some(v) = t
             .get(id)
             .map_err(|e| Error::storage(format!("get capsule: {e}")))?
+        {
+            return serde_json::from_slice(v.value())
+                .map_err(|e| Error::storage(format!("corrupt capsule record: {e}")));
+        }
+
+        // A short handle: two exact index lookups, short -> hash -> id. Tried
+        // before the prefix scan because it is the reference compiled output
+        // actually prints, so it is the one people paste back.
+        let short = tx
+            .open_table(BY_SHORT)
+            .map_err(|e| Error::storage(format!("open short index: {e}")))?;
+        let by_hash = tx
+            .open_table(BY_HASH)
+            .map_err(|e| Error::storage(format!("open hash index: {e}")))?;
+        if let Some(hash) = short
+            .get(id)
+            .map_err(|e| Error::storage(format!("get short: {e}")))?
+            && let Some(target) = by_hash
+                .get(hash.value())
+                .map_err(|e| Error::storage(format!("get by hash: {e}")))?
+            && let Some(v) = t
+                .get(target.value())
+                .map_err(|e| Error::storage(format!("get capsule: {e}")))?
         {
             return serde_json::from_slice(v.value())
                 .map_err(|e| Error::storage(format!("corrupt capsule record: {e}")));
@@ -583,6 +690,70 @@ mod tests {
             f.store.render(c.id.as_str(), LEVEL_RAW, false).unwrap(),
             content
         );
+    }
+
+    #[test]
+    fn a_short_handle_is_stable_for_identical_content() {
+        let f = fixture(1.0);
+        let a = f
+            .store
+            .put(NewCapsule::new("same bytes", ContentType::PlainText))
+            .expect("put a");
+        let b = f
+            .store
+            .put(NewCapsule::new("same bytes", ContentType::PlainText))
+            .expect("put b");
+        assert!(!a.short.is_empty());
+        assert_eq!(
+            a.short, b.short,
+            "identical output gets an identical handle, which is a signal in itself"
+        );
+        assert_ne!(a.id, b.id, "but they are still separate capsules");
+
+        let other = f
+            .store
+            .put(NewCapsule::new("other bytes", ContentType::PlainText))
+            .expect("put other");
+        assert_ne!(a.short, other.short);
+    }
+
+    #[test]
+    fn a_short_handle_is_much_cheaper_than_an_id() {
+        let f = fixture(1.0);
+        let c = f
+            .store
+            .put(NewCapsule::new("payload", ContentType::PlainText))
+            .expect("put");
+        assert!(
+            c.reference().len() < format!("cap://{}", c.id).len() / 2,
+            "{} vs cap://{}",
+            c.reference(),
+            c.id
+        );
+        assert!(c.reference().starts_with("cap://"));
+    }
+
+    #[test]
+    fn a_capsule_resolves_by_its_short_handle() {
+        let f = fixture(1.0);
+        let c = f
+            .store
+            .put(NewCapsule::new("payload", ContentType::PlainText))
+            .expect("put");
+        assert_eq!(f.store.get(&c.short).expect("by short").id, c.id);
+        assert_eq!(f.store.get(&c.reference()).expect("by ref").id, c.id);
+        assert_eq!(f.store.get(c.id.as_str()).expect("by id").id, c.id);
+    }
+
+    #[test]
+    fn a_record_without_a_short_handle_still_resolves() {
+        let f = fixture(1.0);
+        let mut c = f
+            .store
+            .put(NewCapsule::new("payload", ContentType::PlainText))
+            .expect("put");
+        c.short = String::new();
+        assert_eq!(c.reference(), format!("cap://{}", c.id));
     }
 
     #[test]

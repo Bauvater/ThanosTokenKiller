@@ -1,6 +1,13 @@
 [workspace]
 resolver = "3"
-members = ["crates/ttk-core", "crates/ttk-store", "crates/ttk-compilers", "crates/ttk-cli"]
+members = [
+    "crates/ttk-core",
+    "crates/ttk-store",
+    "crates/ttk-learn",
+    "crates/ttk-compilers",
+    "crates/ttk-cli",
+    "crates/ttk-installer",
+]
 
 [workspace.package]
 version = "0.1.0"
@@ -18,6 +25,7 @@ categories = ["command-line-utilities", "development-tools"]
 ttk-core = { path = "crates/ttk-core", version = "0.1.0" }
 ttk-store = { path = "crates/ttk-store", version = "0.1.0" }
 ttk-compilers = { path = "crates/ttk-compilers", version = "0.1.0" }
+ttk-learn = { path = "crates/ttk-learn", version = "0.1.0" }
 
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
@@ -26,6 +34,8 @@ blake3 = "1"
 zstd = "0.13"
 redb = "4"
 clap = { version = "4", features = ["derive", "wrap_help"] }
+anstream = "1"
+anstyle = "1"
 regex = "1"
 thiserror = "2"
 anyhow = "1"

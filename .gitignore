@@ -5,3 +5,6 @@
 .ttk/events/
 .ttk/index.redb*
 /docs
+
+# Built installers (scripts/build-installer.ps1).
+/dist

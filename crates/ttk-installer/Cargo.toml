@@ -1,0 +1,18 @@
+[package]
+name = "ttk-installer"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Windows installer for ThanosTokenKiller: one ttk-setup.exe that carries ttk.exe."
+publish = false
+
+[[bin]]
+name = "ttk-setup"
+path = "src/main.rs"
+
+[dependencies]
+anstream.workspace = true
+anstyle.workspace = true

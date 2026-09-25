@@ -42,6 +42,15 @@ pub struct Candidate {
     pub notes: Vec<String>,
     /// Compiler flagged reduced fidelity (e.g. clustered log lines).
     pub lossy: bool,
+    /// A *lower* gain threshold this candidate is content with.
+    ///
+    /// The default `quality.min_relative_gain` exists so a compiler cannot
+    /// claim a rewrite is worth it when it barely shrinks anything. A learned
+    /// filter is a different bargain: the user explicitly asked for those exact
+    /// lines to go, so removing four of them from a thousand is a success, not
+    /// a rounding error. The firewall takes the *smaller* of the two, so this
+    /// can only ever relax the gain rule — never any other check.
+    pub min_gain_override: Option<f64>,
 }
 
 impl Candidate {
@@ -54,6 +63,7 @@ impl Candidate {
             reparse: Reparse::None,
             notes: Vec::new(),
             lossy: false,
+            min_gain_override: None,
         }
     }
 
@@ -74,6 +84,16 @@ impl Candidate {
 
     pub fn lossy(mut self, lossy: bool) -> Self {
         self.lossy = lossy;
+        self
+    }
+
+    /// Accept a smaller relative saving than the configured minimum.
+    ///
+    /// Clamped into `0.0..=1.0`; the firewall additionally takes the minimum of
+    /// this and the configured value, so a candidate can never ask for *more*
+    /// leniency than the name suggests or tighten the rule for itself.
+    pub fn min_gain(mut self, gain: f64) -> Self {
+        self.min_gain_override = Some(gain.clamp(0.0, 1.0));
         self
     }
 }
@@ -212,7 +232,10 @@ impl<'a> Firewall<'a> {
         }
 
         // 5. The transformation has to pay for itself.
-        let min_gain = self.config.quality.min_relative_gain;
+        let min_gain = match candidate.min_gain_override {
+            Some(asked) => asked.min(self.config.quality.min_relative_gain),
+            None => self.config.quality.min_relative_gain,
+        };
         let threshold = (before.value as f64 * (1.0 - min_gain)).floor() as u64;
         if before.value > 0 && after.value > threshold {
             return reject(FallbackReason::NoGain, candidate.notes.clone());
@@ -363,6 +386,50 @@ mod tests {
         more chatter, even more chatter, filler filler filler filler filler\n\
         FAILED tests/auth/test_expiry.py:87 - AssertionError expected=401 actual=200\n\
         done, exit code 1\n";
+
+    /// A candidate may relax the gain rule for itself, and only that rule.
+    #[test]
+    fn a_min_gain_override_relaxes_only_the_gain_check() {
+        let config = cfg(Mode::Safe);
+        let fw = Firewall::new(&config);
+        // Forty lines of noise around the real output; removing one of them is
+        // a genuine saving but far under the 5% default threshold.
+        let noise = "npm WARN deprecated pkg is not supported here
+";
+        let original = format!("{}{ORIGINAL}", noise.repeat(40));
+        let barely = original.replacen(noise, "", 1);
+
+        let strict = fw.review(&original, Candidate::new("learn.filter", 1, barely.clone()));
+        assert!(
+            !strict.accepted(),
+            "under the threshold, this must fall back"
+        );
+        assert_eq!(strict.record.fallback, Some(FallbackReason::NoGain));
+
+        let relaxed = fw.review(
+            &original,
+            Candidate::new("learn.filter", 1, barely).min_gain(0.0),
+        );
+        assert!(relaxed.accepted(), "{:?}", relaxed.record.fallback);
+
+        // …but it buys no leniency anywhere else: dropping the failure line is
+        // still refused, override or not.
+        let gutted = original.replacen(
+            "FAILED tests/auth/test_expiry.py:87 - AssertionError expected=401 actual=200
+",
+            "",
+            1,
+        );
+        let verdict = fw.review(
+            &original,
+            Candidate::new("learn.filter", 1, gutted).min_gain(0.0),
+        );
+        assert!(!verdict.accepted());
+        assert!(matches!(
+            verdict.record.fallback,
+            Some(FallbackReason::InvariantLost(_))
+        ));
+    }
 
     fn good_candidate() -> Candidate {
         Candidate::new(

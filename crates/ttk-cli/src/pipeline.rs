@@ -5,8 +5,10 @@
 //!   → content detection
 //!   → secret redaction          (local mapping, never leaves the machine)
 //!   → capsule store             (byte exact original, always)
-//!   → specialized compiler      (Token IR)
+//!   → learned filter            (rules an agent taught with <filter-trash>)
 //!   → quality firewall          (invariants, re-parse, gain)
+//!   → candidates:               repeat · delta · specialized compiler
+//!   → quality firewall          (reviews each; the smallest survivor wins)
 //!   → token event + JSONL log
 //!   → final output
 //! ```
@@ -17,15 +19,17 @@
 
 use serde_json::json;
 
+use crate::delta;
 use ttk_compilers::{CommandContext, CompileInput};
 use ttk_core::config::Config;
 use ttk_core::content::{self, Detection};
 use ttk_core::event::{EventDirection, EventSource, TokenEvent};
-use ttk_core::firewall::Firewall;
+use ttk_core::firewall::{Candidate, Firewall, Verdict};
 use ttk_core::ids::SessionId;
 use ttk_core::redact;
 use ttk_core::trust::{SensitivityLevel, TrustLevel};
 use ttk_core::{Result, tokens};
+use ttk_learn::{Engine, Filtered, RuleSet};
 use ttk_store::{NewCapsule, Workspace};
 
 pub struct PipelineInput<'a> {
@@ -37,6 +41,9 @@ pub struct PipelineInput<'a> {
     /// Name hint for content detection, e.g. a file name.
     pub name: Option<&'a str>,
     pub session: SessionId,
+    /// Learned filter rules to apply. `None` disables the stage entirely,
+    /// which is what `--no-filter` and a dry run use.
+    pub rules: Option<&'a RuleSet>,
 }
 
 impl<'a> PipelineInput<'a> {
@@ -49,7 +56,13 @@ impl<'a> PipelineInput<'a> {
             command: None,
             name: None,
             session,
+            rules: None,
         }
+    }
+
+    pub fn rules(mut self, rules: &'a RuleSet) -> Self {
+        self.rules = Some(rules);
+        self
     }
 
     pub fn command(mut self, c: &'a CommandContext) -> Self {
@@ -72,6 +85,32 @@ pub struct PipelineOutput {
     /// `cap://<id>` of the stored original, if one was written.
     pub capsule_ref: Option<String>,
     pub secrets_redacted: usize,
+    /// What the learned filter did, when it ran and was accepted.
+    pub filtered: Option<Filtered>,
+    /// Which transformer produced the final content, if any did.
+    pub winner: Option<String>,
+    /// Rules matched a line the error guard refused to remove. A number above
+    /// zero means a rule is drifting and is worth reporting.
+    pub protected_lines: u64,
+}
+
+/// Union of two invariant lists, deduplicated and sorted.
+///
+/// Mirrors what `TokenEvent::apply` does, needed here because the winning
+/// candidate is applied by hand rather than through `apply`: several candidates
+/// are reviewed and only one is kept.
+fn merge_invariants(
+    a: &[ttk_core::invariants::Invariant],
+    b: &[ttk_core::invariants::Invariant],
+) -> Vec<ttk_core::invariants::Invariant> {
+    let mut out = a.to_vec();
+    for inv in b {
+        if !out.contains(inv) {
+            out.push(inv.clone());
+        }
+    }
+    out.sort();
+    out
 }
 
 /// Run the full pipeline for one piece of content.
@@ -133,12 +172,80 @@ pub fn process(
             .meta("source", json!(input.source.as_str()))
             .meta("command", json!(input.command.map(|c| c.command_line()))),
     )?;
-    let capsule_ref = format!("cap://{}", capsule.id);
+    // The short handle, not the full id: this string is printed on every
+    // compiled output, and a 26 character random id costs more tokens than
+    // some whole compiled messages.
+    let capsule_ref = capsule.reference();
     event.capsule_id = Some(capsule.id.clone());
     event.original_content_ref.stored = true;
 
-    // 3. Compile.
-    let mut compile_input = CompileInput::new(&redacted.text, config)
+    // 3. Learned filter. Before the compiler on purpose: a compiler should
+    //    not have to parse around noise somebody already retired, and the
+    //    saving compounds instead of competing.
+    let mut working = redacted.text.clone();
+    let mut filtered = None;
+    let mut protected_lines = 0;
+    let mut winner: Option<String> = None;
+    if config.learning.enabled
+        && let Some(rules) = input.rules
+    {
+        let program = input.command.and_then(CommandContext::program);
+        let subcommand = input.command.and_then(CommandContext::subcommand);
+        let engine = Engine::for_command(rules, program.as_deref(), subcommand)
+            .protect_errors(config.learning.protect_errors);
+        if !engine.is_empty() {
+            let pass = engine.filter(&working);
+            protected_lines = pass.protected_lines;
+            if pass.changed() {
+                // A learned filter is an explicit instruction, so it does not
+                // have to clear the compilers' relative-gain bar — but every
+                // other firewall check still applies to it unchanged.
+                let candidate = Candidate::new("learn.filter", 1, pass.text.clone())
+                    .min_gain(0.0)
+                    .note(pass.summary());
+                let verdict = Firewall::new(config).review(&working, candidate);
+                let accepted = verdict.accepted();
+                event.apply(verdict.output.clone(), verdict.record);
+                if accepted {
+                    working = verdict.output;
+                    filtered = Some(pass);
+                } else {
+                    // `apply` recorded the attempt; the content stays original.
+                    event.transformed_content = None;
+                    event.estimated_tokens_after = event.estimated_tokens_before;
+                }
+            }
+        }
+        if protected_lines > 0 {
+            event
+                .metadata
+                .insert("filter_protected_lines".to_string(), json!(protected_lines));
+        }
+    }
+
+    // 4. Candidates. A compiler is one of several ways to say the same thing
+    //    in fewer tokens, and it is not always the best one: eleven identical
+    //    `cargo test` runs in a row are better answered by "the same as two
+    //    minutes ago" than by eleven identical compilations of the same
+    //    passing summary.
+    //
+    //    Every candidate goes through the same firewall, and the smallest one
+    //    that survives wins. None of them is trusted to judge itself, and
+    //    every one of them carries the error-shaped lines forward — which is
+    //    why the firewall can accept a pointer at all.
+    let command_line = input.command.map(CommandContext::command_line);
+    let previous = delta::previous_run(workspace, command_line.as_deref(), event.timestamp_millis);
+
+    let mut candidates: Vec<Candidate> = Vec::new();
+    if let Some(prev) = &previous {
+        if let Some(c) = delta::repeat(&working, &event.source_hash, prev, event.timestamp_millis) {
+            candidates.push(c);
+        } else if let Some(c) = delta::delta(&working, prev, event.timestamp_millis, config) {
+            candidates.push(c);
+        }
+    }
+
+    let mut compile_input = CompileInput::new(&working, config)
         .source(input.source)
         .content_type(detection.content_type)
         .capsule(&capsule_ref);
@@ -146,25 +253,50 @@ pub fn process(
         compile_input = compile_input.command(c);
     }
 
-    let final_content = match ttk_compilers::compile(&compile_input) {
-        Some(candidate) => {
-            // 4. Firewall. It owns the decision, not the compiler.
-            let verdict = Firewall::new(config).review(&redacted.text, candidate);
-            let accepted = verdict.accepted();
-            let output = verdict.output.clone();
-            event.apply(output.clone(), verdict.record);
-            if !accepted {
-                // `apply` recorded the attempt; the content stays original.
-                event.transformed_content = None;
-                event.estimated_tokens_after = event.estimated_tokens_before;
-            }
-            output
+    if let Some(candidate) = ttk_compilers::compile(&compile_input) {
+        candidates.push(candidate);
+    } else if candidates.is_empty() {
+        event
+            .metadata
+            .insert("no_compiler".to_string(), json!(true));
+    }
+
+    // 5. Firewall. It owns the decision, not the candidate.
+    let firewall = Firewall::new(config);
+    let mut best: Option<Verdict> = None;
+    for candidate in candidates {
+        let verdict = firewall.review(&working, candidate);
+        let accepted = verdict.accepted();
+        // Every attempt is recorded, accepted or not: a rejected candidate is
+        // exactly what `ttk explain` has to be able to show.
+        event.transformations.push(verdict.record.clone());
+        if !accepted {
+            continue;
         }
-        None => {
+        let better = best
+            .as_ref()
+            .is_none_or(|b| verdict.output.len() < b.output.len());
+        if better {
+            best = Some(verdict);
+        }
+    }
+
+    let final_content = match best {
+        Some(verdict) => {
+            event.invariants = merge_invariants(&event.invariants, &verdict.record.invariants);
+            event.estimated_tokens_after = verdict.record.tokens_after;
+            event.transformed_content = Some(verdict.output.clone());
             event
                 .metadata
-                .insert("no_compiler".to_string(), json!(true));
-            redacted.text.clone()
+                .insert("winner".to_string(), json!(verdict.record.transformer));
+            winner = Some(verdict.record.transformer.clone());
+            verdict.output
+        }
+        None => {
+            // Nothing beat the input, so the filtered content stands.
+            event.transformed_content = (working != redacted.text).then(|| working.clone());
+            event.estimated_tokens_after = tokens::estimate(&working);
+            working.clone()
         }
     };
 
@@ -177,6 +309,9 @@ pub fn process(
         detection,
         capsule_ref: Some(capsule_ref),
         secrets_redacted: redacted.hits.len(),
+        filtered,
+        protected_lines,
+        winner,
     })
 }
 

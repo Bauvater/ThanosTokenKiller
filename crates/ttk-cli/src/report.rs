@@ -14,6 +14,8 @@ use serde::Serialize;
 use ttk_core::event::{TokenEvent, ValidationOutcome};
 use ttk_core::tokens::{CountMethod, TokenCount};
 
+use crate::ui::{self, Align};
+
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct TransformerStat {
     pub transformer: String,
@@ -120,49 +122,104 @@ impl GainReport {
     }
 
     pub fn render(&self) -> String {
-        let mut out = String::new();
         let est = self.method == CountMethod::Estimated.as_str();
-        let m = |v: u64| if est { format!("~{v}") } else { v.to_string() };
+        let m = |v: u64| ui::tokens(v, est);
+        let mut out = String::new();
 
-        out.push_str(&format!("session          {}\n", self.session));
         out.push_str(&format!(
-            "events           {} ({} transformed)\n",
-            self.events, self.events_transformed
+            "{}\n",
+            ui::banner(&format!("session {}", self.session))
         ));
-        out.push_str(&format!("tokens before    {:>12}\n", m(self.tokens_before)));
-        out.push_str(&format!("tokens after     {:>12}\n", m(self.tokens_after)));
         out.push_str(&format!(
-            "saved            {:>12}  ({:.1}%)\n",
-            m(self.saved()),
-            self.saved_percent()
+            "{}\n",
+            ui::kv_note(
+                "events",
+                self.events,
+                format!("{} compiled", self.events_transformed)
+            )
         ));
-        out.push_str(&format!("counting method  {}\n", self.method));
-        out.push_str(&format!("capsules written {}\n", self.capsules_written));
+        out.push_str(&format!(
+            "{}\n",
+            ui::kv_num(
+                "tokens",
+                format!(
+                    "{} {} {}",
+                    m(self.tokens_before),
+                    ui::glyphs().arrow,
+                    ui::paint(ui::ACCENT, m(self.tokens_after))
+                ),
+                ""
+            )
+        ));
+        out.push_str(&format!(
+            "{}\n",
+            ui::kv_note(
+                "saved",
+                format!(
+                    "{:>12}  {}",
+                    ui::paint(ui::OK, m(self.saved())),
+                    ui::bar(self.saved_percent() / 100.0, 24)
+                ),
+                format!("{:.1}%", self.saved_percent())
+            )
+        ));
+        out.push_str(&format!("{}\n", ui::kv("counting method", &self.method)));
+        out.push_str(&format!(
+            "{}\n",
+            ui::kv("capsules written", self.capsules_written)
+        ));
         if self.secrets_redacted > 0 {
-            out.push_str(&format!("secrets redacted {}\n", self.secrets_redacted));
+            out.push_str(&format!(
+                "{}\n",
+                ui::kv(
+                    "secrets redacted",
+                    ui::paint(ui::WARN, self.secrets_redacted)
+                )
+            ));
         }
 
         if !self.by_transformer.is_empty() {
-            out.push_str("\nby transformer\n");
+            out.push_str(&format!("{}\n", ui::heading("by transformer")));
+            let rows: Vec<Vec<String>> = self
+                .by_transformer
+                .iter()
+                .map(|s| {
+                    vec![
+                        s.transformer.clone(),
+                        ui::paint(ui::OK, format!("-{}", m(s.saved()))),
+                        s.accepted.to_string(),
+                        if s.rejected == 0 {
+                            "0".to_string()
+                        } else {
+                            ui::paint(ui::WARN, s.rejected)
+                        },
+                    ]
+                })
+                .collect();
+            out.push_str(&ui::table(
+                &["transformer", "saved", "kept", "fell back"],
+                &[Align::Left, Align::Right, Align::Right, Align::Right],
+                &rows,
+            ));
             for s in &self.by_transformer {
-                out.push_str(&format!(
-                    "  {:<18} {:>10}  accepted={} rejected={}\n",
-                    s.transformer,
-                    format!("-{}", m(s.saved())),
-                    s.accepted,
-                    s.rejected
-                ));
                 for (reason, n) in &s.fallbacks {
-                    out.push_str(&format!("      fallback x{n}: {reason}\n"));
+                    out.push_str(&format!(
+                        "{}\n",
+                        ui::detail(format!("{} fell back x{n}: {reason}", s.transformer))
+                    ));
                 }
             }
         }
 
         if est {
-            out.push_str(
-                "\nnote: `~` marks heuristic estimates. Exact counts require a provider\n\
-                 usage field or a model tokenizer; neither was available for this session.\n",
-            );
+            out.push_str(&format!(
+                "\n{}\n",
+                ui::paint(
+                    ui::DIM,
+                    "`~` marks heuristic estimates. Exact counts need a provider usage \
+                     field or a model tokenizer; neither was available here."
+                )
+            ));
         }
         out
     }
@@ -319,84 +376,696 @@ impl StatsReport {
     }
 
     pub fn render(&self) -> String {
-        let mut out = String::new();
         let est = self.method == CountMethod::Estimated.as_str();
-        let m = |v: u64| if est { format!("~{v}") } else { v.to_string() };
+        let m = |v: u64| ui::tokens(v, est);
+        let mut out = String::new();
 
-        out.push_str("ThanosTokenKiller — lifetime statistics for this workspace\n\n");
+        out.push_str(&format!("{}\n\n", ui::banner("lifetime statistics")));
+
+        if self.events == 0 {
+            out.push_str(&format!(
+                "{}\n\n",
+                ui::paint(ui::DIM, "nothing recorded in this workspace yet.")
+            ));
+            out.push_str(&format!("{}\n", ui::hint("try ", "ttk run -- cargo test")));
+            out.push_str(&format!("{}\n", ui::hint("then", "ttk stats")));
+            return out;
+        }
+
+        // The headline: one number, one bar, and the share it represents.
         out.push_str(&format!(
-            "tokens saved     {:>14}  ({:.1}% of {})\n",
-            m(self.saved()),
-            self.saved_percent(),
-            m(self.tokens_before)
+            "  {}  {}  {}\n",
+            ui::paint(ui::ACCENT, format!("{:>14}", m(self.saved()))),
+            ui::bar(self.saved_percent() / 100.0, 28),
+            ui::paint(
+                ui::DIM,
+                format!(
+                    "{:.1}% of {} tokens",
+                    self.saved_percent(),
+                    m(self.tokens_before)
+                )
+            )
         ));
-        out.push_str(&format!("context sent     {:>14}\n", m(self.tokens_after)));
-        out.push_str(&format!("counting method  {:>14}\n", self.method));
-        out.push_str(&format!("commands run     {:>14}\n", self.commands_run));
         out.push_str(&format!(
-            "events           {:>14}  ({} compiled, {} passed through)\n",
-            self.events,
-            self.events_transformed,
-            self.events.saturating_sub(self.events_transformed)
+            "  {}\n\n",
+            ui::paint(ui::DIM, "tokens that never reached a model")
         ));
-        out.push_str(&format!("sessions         {:>14}\n", self.sessions));
+
         out.push_str(&format!(
-            "transformations  {:>14}  ({} accepted, {} fell back)\n",
-            self.transformations_accepted + self.transformations_rejected,
-            self.transformations_accepted,
-            self.transformations_rejected
+            "{}\n",
+            ui::kv_num("context sent", m(self.tokens_after), "")
+        ));
+        out.push_str(&format!(
+            "{}\n",
+            ui::kv_num("commands run", self.commands_run, "")
+        ));
+        out.push_str(&format!(
+            "{}\n",
+            ui::kv_num(
+                "events",
+                self.events,
+                format!(
+                    "{} compiled, {} passed through",
+                    self.events_transformed,
+                    self.events.saturating_sub(self.events_transformed)
+                )
+            )
+        ));
+        out.push_str(&format!("{}\n", ui::kv_num("sessions", self.sessions, "")));
+        out.push_str(&format!(
+            "{}\n",
+            ui::kv_num(
+                "transformations",
+                self.transformations_accepted + self.transformations_rejected,
+                format!(
+                    "{} accepted, {} fell back",
+                    self.transformations_accepted, self.transformations_rejected
+                )
+            )
         ));
         if let (Some(first), Some(last)) = (self.first_event_millis, self.last_event_millis) {
             out.push_str(&format!(
-                "active period    {:>14}\n",
-                human_span(last.saturating_sub(first))
+                "{}\n",
+                ui::kv_num("active period", human_span(last.saturating_sub(first)), "")
             ));
         }
         out.push_str(&format!(
-            "capsules         {:>14}  ({:.2} MiB on disk for {:.2} MiB of originals)\n",
-            self.capsules,
-            self.blob_bytes as f64 / 1_048_576.0,
-            self.original_bytes as f64 / 1_048_576.0
+            "{}\n",
+            ui::kv_num(
+                "capsules",
+                self.capsules,
+                format!(
+                    "{:.2} MiB on disk for {:.2} MiB of originals",
+                    self.blob_bytes as f64 / 1_048_576.0,
+                    self.original_bytes as f64 / 1_048_576.0
+                )
+            )
+        ));
+        out.push_str(&format!(
+            "{}\n",
+            ui::kv_num("counting method", &self.method, "")
         ));
         if self.secrets_redacted > 0 {
-            out.push_str(&format!("secrets redacted {:>14}\n", self.secrets_redacted));
+            out.push_str(&format!(
+                "{}\n",
+                ui::kv_num(
+                    "secrets redacted",
+                    ui::paint(ui::WARN, self.secrets_redacted),
+                    "kept local, never sent"
+                )
+            ));
         }
 
         if !self.by_command.is_empty() {
-            out.push_str("\ntop commands\n");
-            for c in self.by_command.iter().take(10) {
-                out.push_str(&format!(
-                    "  {:<16} {:>12} saved  ({} run{})\n",
-                    c.program,
-                    m(c.saved()),
-                    c.runs,
-                    if c.runs == 1 { "" } else { "s" }
-                ));
-            }
+            out.push_str(&format!("{}\n", ui::heading("where the savings came from")));
+            let top = self
+                .by_command
+                .first()
+                .map(CommandStat::saved)
+                .unwrap_or(1)
+                .max(1);
+            let rows: Vec<Vec<String>> = self
+                .by_command
+                .iter()
+                .take(10)
+                .map(|c| {
+                    vec![
+                        c.program.clone(),
+                        ui::paint(ui::OK, m(c.saved())),
+                        ui::bar(c.saved() as f64 / top as f64, 16),
+                        format!("{} run{}", c.runs, if c.runs == 1 { "" } else { "s" }),
+                    ]
+                })
+                .collect();
+            out.push_str(&ui::table(
+                &["command", "saved", "", "runs"],
+                &[Align::Left, Align::Right, Align::Left, Align::Right],
+                &rows,
+            ));
         }
 
         if !self.by_transformer.is_empty() {
-            out.push_str("\nby transformer\n");
-            for s in self.by_transformer.iter().take(15) {
-                out.push_str(&format!(
-                    "  {:<18} {:>12} saved  accepted={} fell_back={}\n",
-                    s.transformer,
-                    m(s.saved()),
-                    s.accepted,
-                    s.rejected
-                ));
-            }
+            out.push_str(&format!("{}\n", ui::heading("by transformer")));
+            let rows: Vec<Vec<String>> = self
+                .by_transformer
+                .iter()
+                .take(15)
+                .map(|s| {
+                    vec![
+                        s.transformer.clone(),
+                        ui::paint(ui::OK, m(s.saved())),
+                        s.accepted.to_string(),
+                        if s.rejected == 0 {
+                            "0".to_string()
+                        } else {
+                            ui::paint(ui::WARN, s.rejected)
+                        },
+                    ]
+                })
+                .collect();
+            out.push_str(&ui::table(
+                &["transformer", "saved", "kept", "fell back"],
+                &[Align::Left, Align::Right, Align::Right, Align::Right],
+                &rows,
+            ));
         }
 
-        if self.events == 0 {
-            out.push_str("\nnothing recorded yet — try `ttk run -- cargo test`\n");
-        } else if est {
-            out.push_str(
-                "\nnote: `~` marks heuristic estimates. Exact counts need a provider usage\n\
-                 field or a model tokenizer; neither was available for these events.\n",
-            );
+        if est {
+            out.push_str(&format!(
+                "\n{} {}\n",
+                ui::paint(ui::DIM, ui::glyphs().bullet),
+                ui::paint(
+                    ui::DIM,
+                    "`~` marks heuristic estimates: exact counts need a provider usage field."
+                )
+            ));
         }
         out
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The global ledger
+// ---------------------------------------------------------------------------
+
+/// Render everything ttk has saved, across every project.
+///
+/// This is the report people come back for, so it leads with one number and
+/// one bar and only then explains itself. The per-project table is what a
+/// workspace-local `ttk stats` can never show.
+pub fn render_global(usage: &ttk_store::GlobalUsage) -> String {
+    let est = usage.method != "provider" && usage.method != "tokenizer";
+    let m = |v: u64| ui::tokens(v, est);
+    let mut out = String::new();
+
+    out.push_str(&format!(
+        "{}\n\n",
+        ui::banner("everything ttk has saved, everywhere")
+    ));
+
+    if usage.is_empty() {
+        out.push_str(&format!(
+            "{}\n\n",
+            ui::paint(
+                ui::DIM,
+                "no project has recorded anything yet. Any `ttk run` in any repository\n\
+                 lands here, so this fills up on its own."
+            )
+        ));
+        out.push_str(&format!(
+            "{}\n",
+            ui::hint("start with", "ttk run -- cargo test")
+        ));
+        if let Some(p) = &usage.path {
+            out.push_str(&format!("{}\n", ui::kv("ledger", p.display())));
+        }
+        return out;
+    }
+
+    out.push_str(&format!(
+        "  {}  {}  {}\n",
+        ui::paint(ui::ACCENT, format!("{:>14}", m(usage.saved()))),
+        ui::bar(usage.saved_percent() / 100.0, 28),
+        ui::paint(
+            ui::DIM,
+            format!(
+                "{:.1}% of {} tokens",
+                usage.saved_percent(),
+                m(usage.tokens_before)
+            )
+        )
+    ));
+    out.push_str(&format!(
+        "  {}\n\n",
+        ui::paint(ui::DIM, "tokens that never reached a model")
+    ));
+
+    out.push_str(&format!(
+        "{}\n",
+        ui::kv_num("projects", usage.projects.len(), "")
+    ));
+    out.push_str(&format!("{}\n", ui::kv_num("commands", usage.events, "")));
+    out.push_str(&format!(
+        "{}\n",
+        ui::kv_num("context sent", m(usage.tokens_after), "")
+    ));
+    if usage.filtered_lines > 0 {
+        out.push_str(&format!(
+            "{}\n",
+            ui::kv_num(
+                "lines filtered",
+                ui::thousands(usage.filtered_lines),
+                "by rules your agents taught"
+            )
+        ));
+    }
+    if let (Some(first), Some(last)) = (usage.first_millis, usage.last_millis) {
+        out.push_str(&format!(
+            "{}\n",
+            ui::kv_num("active period", human_span(last.saturating_sub(first)), "")
+        ));
+    }
+    out.push_str(&format!(
+        "{}\n",
+        ui::kv_num("counting method", &usage.method, "")
+    ));
+
+    // Per project, ranked by what it saved.
+    out.push_str(&format!("{}\n", ui::heading("by project")));
+    let top = usage
+        .projects
+        .first()
+        .map(|p| p.saved())
+        .unwrap_or(1)
+        .max(1);
+    let rows: Vec<Vec<String>> = usage
+        .projects
+        .iter()
+        .take(15)
+        .map(|p| {
+            vec![
+                ui::ellipsize(&short_path(&p.project), 44),
+                ui::paint(ui::OK, m(p.saved())),
+                ui::bar(p.saved() as f64 / top as f64, 14),
+                format!("{:.0}%", p.saved_percent()),
+                ui::thousands(p.events),
+            ]
+        })
+        .collect();
+    out.push_str(&ui::table(
+        &["project", "saved", "", "rate", "runs"],
+        &[
+            Align::Left,
+            Align::Right,
+            Align::Left,
+            Align::Right,
+            Align::Right,
+        ],
+        &rows,
+    ));
+    if usage.projects.len() > 15 {
+        out.push_str(&format!(
+            "{}\n",
+            ui::detail(format!("{} more project(s)", usage.projects.len() - 15))
+        ));
+    }
+
+    let programs = usage.by_program();
+    if !programs.is_empty() {
+        out.push_str(&format!(
+            "{}\n",
+            ui::heading("by command, across every project")
+        ));
+        let top = programs.first().map(|(_, t)| t.saved()).unwrap_or(1).max(1);
+        let rows: Vec<Vec<String>> = programs
+            .iter()
+            .take(10)
+            .map(|(name, t)| {
+                vec![
+                    name.clone(),
+                    ui::paint(ui::OK, m(t.saved())),
+                    ui::bar(t.saved() as f64 / top as f64, 14),
+                    format!("{} run{}", t.runs, if t.runs == 1 { "" } else { "s" }),
+                ]
+            })
+            .collect();
+        out.push_str(&ui::table(
+            &["command", "saved", "", "runs"],
+            &[Align::Left, Align::Right, Align::Left, Align::Right],
+            &rows,
+        ));
+    }
+
+    if usage.skipped_lines > 0 {
+        out.push_str(&format!(
+            "\n{}\n",
+            ui::warn(format!(
+                "{} unreadable record(s) skipped — the totals are that much low",
+                usage.skipped_lines
+            ))
+        ));
+    }
+    if let Some(p) = &usage.path {
+        out.push_str(&format!(
+            "\n{}\n",
+            ui::paint(
+                ui::DIM,
+                format!("ledger: {}  (local only, never sent anywhere)", p.display())
+            )
+        ));
+    }
+    if est {
+        out.push_str(&format!(
+            "{} {}\n",
+            ui::paint(ui::DIM, ui::glyphs().bullet),
+            ui::paint(
+                ui::DIM,
+                "`~` marks heuristic estimates: exact counts need a provider usage field."
+            )
+        ));
+    }
+    out
+}
+
+// ---------------------------------------------------------------------------
+// `ttk gain`: the running total
+// ---------------------------------------------------------------------------
+
+/// Everything `ttk gain` shows, gathered by the command so that rendering stays
+/// a pure function of it.
+pub struct GainView<'a> {
+    /// Totals, already narrowed to one project when `--project` was given.
+    pub usage: &'a ttk_store::GlobalUsage,
+    /// Per-day totals, keyed by local day number.
+    pub daily: &'a BTreeMap<i64, ttk_store::usage::ProgramTotals>,
+    /// Today's local day number.
+    pub today: i64,
+    /// How many days the chart covers.
+    pub days: usize,
+    /// `all projects`, or the project's path.
+    pub scope: String,
+    /// Whether the view is the whole ledger (and so worth a project table).
+    pub all_projects: bool,
+    /// The global folder, and what is in it.
+    pub home: Option<std::path::PathBuf>,
+    pub filter_files: usize,
+    pub filter_rules: usize,
+}
+
+impl GainView<'_> {
+    /// Saved tokens and runs over the last `n` days, today included.
+    fn window(&self, n: i64) -> ttk_store::usage::ProgramTotals {
+        let mut t = ttk_store::usage::ProgramTotals::default();
+        for (_, d) in self.daily.range(self.today - n + 1..=self.today) {
+            t.runs += d.runs;
+            t.tokens_before += d.tokens_before;
+            t.tokens_after += d.tokens_after;
+        }
+        t
+    }
+}
+
+/// Render `ttk gain`: one big number, then where it came from.
+pub fn render_gain(v: &GainView) -> String {
+    let usage = v.usage;
+    let est = usage.method != "provider" && usage.method != "tokenizer";
+    let m = |n: u64| ui::tokens(n, est);
+    let rate = |t: &ttk_store::usage::ProgramTotals| {
+        if t.tokens_before == 0 {
+            "–".to_string()
+        } else {
+            format!("{:.0}%", t.saved() as f64 * 100.0 / t.tokens_before as f64)
+        }
+    };
+    let mut out = String::new();
+
+    out.push_str(&ui::banner(&format!(
+        "token savings {} {}",
+        ui::glyphs().bullet,
+        v.scope
+    )));
+    out.push_str("\n\n");
+
+    if usage.is_empty() {
+        out.push_str(&format!(
+            "  {}\n  {}\n\n",
+            ui::paint(ui::HEAD, "Nothing saved yet."),
+            ui::paint(
+                ui::DIM,
+                "Every `ttk run`, in any project, is counted here automatically."
+            )
+        ));
+        out.push_str(&format!(
+            "{}\n",
+            ui::hint("try it ", "ttk run -- git status")
+        ));
+        out.push_str(&format!("{}\n", ui::hint("then   ", "ttk gain")));
+        out.push_str(&render_gain_folder(v));
+        return out;
+    }
+
+    // -- the headline ------------------------------------------------------
+    out.push_str(&format!("  {}\n", ui::paint(ui::DIM, "TOKENS SAVED")));
+    out.push_str(&format!("  {}\n", ui::paint(ui::HERO, m(usage.saved()))));
+    out.push_str(&format!(
+        "  {}  {}  {}\n",
+        ui::bar(usage.saved_percent() / 100.0, 36),
+        ui::paint(ui::HEAD, format!("{:.1}%", usage.saved_percent())),
+        ui::paint(
+            ui::DIM,
+            format!("of {} tokens never reached a model", m(usage.tokens_before))
+        )
+    ));
+
+    // -- by period ---------------------------------------------------------
+    let all_time = ttk_store::usage::ProgramTotals {
+        runs: usage.events,
+        tokens_before: usage.tokens_before,
+        tokens_after: usage.tokens_after,
+    };
+    let mut rows = Vec::new();
+    for (label, t) in [
+        ("today", v.window(1)),
+        ("last 7 days", v.window(7)),
+        ("last 30 days", v.window(30)),
+        ("all time", all_time),
+    ] {
+        rows.push(vec![
+            label.to_string(),
+            if t.saved() == 0 {
+                ui::paint(ui::DIM, m(0))
+            } else {
+                ui::paint(ui::SAVED, m(t.saved()))
+            },
+            ui::thousands(t.runs),
+            rate(&t),
+        ]);
+    }
+    out.push('\n');
+    out.push_str(&ui::table(
+        &["period", "saved", "runs", "rate"],
+        &[Align::Left, Align::Right, Align::Right, Align::Right],
+        &rows,
+    ));
+
+    let mut facts = vec![format!(
+        "{} project{}",
+        usage.projects.len(),
+        if usage.projects.len() == 1 { "" } else { "s" }
+    )];
+    if let Some(first) = usage.first_millis {
+        facts.push(format!(
+            "since {}",
+            ui::iso_date(ttk_store::usage::day_number(first, ui::local_offset_secs()))
+        ));
+    }
+    if usage.filtered_lines > 0 {
+        facts.push(format!(
+            "{} lines removed by learned filters",
+            ui::thousands(usage.filtered_lines)
+        ));
+    }
+    out.push_str(&format!(
+        "  {}\n",
+        ui::paint(ui::DIM, facts.join(&format!(" {} ", ui::glyphs().bullet)))
+    ));
+
+    // -- the chart ---------------------------------------------------------
+    let days = v.days.max(1) as i64;
+    let series: Vec<(i64, ttk_store::usage::ProgramTotals)> = (v.today - days + 1..=v.today)
+        .map(|d| (d, v.daily.get(&d).copied().unwrap_or_default()))
+        .collect();
+    let values: Vec<u64> = series.iter().map(|(_, t)| t.saved()).collect();
+    let top = values.iter().copied().max().unwrap_or(0).max(1);
+    let active = series.iter().any(|(_, t)| t.runs > 0);
+    out.push_str(&ui::heading(&format!("last {days} days")));
+    if active {
+        out.push_str(&format!("  {}", ui::sparkline(&values)));
+    }
+    out.push('\n');
+    if !active {
+        // Fourteen empty rows say less than one line does.
+        out.push_str(&format!(
+            "  {}\n",
+            ui::paint(ui::DIM, format!("no runs in the last {days} days"))
+        ));
+    }
+    for (day, t) in series.iter().rev().filter(|_| active) {
+        let label = if *day == v.today {
+            ui::paint(ui::HEAD, format!("{:<9}", "today"))
+        } else {
+            ui::paint(ui::DIM, ui::short_day(*day))
+        };
+        if t.runs == 0 {
+            out.push_str(&format!(
+                "  {label}  {}\n",
+                ui::paint(ui::DIM, ui::glyphs().bar_empty.repeat(28))
+            ));
+            continue;
+        }
+        out.push_str(&format!(
+            "  {label}  {}  {:>12}  {}\n",
+            ui::bar(t.saved() as f64 / top as f64, 28),
+            ui::paint(ui::SAVED, m(t.saved())),
+            ui::paint(
+                ui::DIM,
+                format!("{} run{}", t.runs, if t.runs == 1 { "" } else { "s" })
+            )
+        ));
+    }
+
+    // -- where it came from ------------------------------------------------
+    let programs = usage.by_program();
+    if !programs.is_empty() {
+        out.push_str(&format!("{}\n", ui::heading("top commands")));
+        let top = programs.first().map(|(_, t)| t.saved()).unwrap_or(1).max(1);
+        let rows: Vec<Vec<String>> = programs
+            .iter()
+            .take(8)
+            .map(|(name, t)| {
+                vec![
+                    ui::paint(ui::CODE, name),
+                    ui::paint(ui::SAVED, m(t.saved())),
+                    ui::bar(t.saved() as f64 / top as f64, 16),
+                    rate(t),
+                    ui::thousands(t.runs),
+                ]
+            })
+            .collect();
+        out.push_str(&ui::table(
+            &["command", "saved", "", "rate", "runs"],
+            &[
+                Align::Left,
+                Align::Right,
+                Align::Left,
+                Align::Right,
+                Align::Right,
+            ],
+            &rows,
+        ));
+    }
+
+    if v.all_projects && usage.projects.len() > 1 {
+        out.push_str(&format!("{}\n", ui::heading("top projects")));
+        let top = usage
+            .projects
+            .first()
+            .map(|p| p.saved())
+            .unwrap_or(1)
+            .max(1);
+        let rows: Vec<Vec<String>> = usage
+            .projects
+            .iter()
+            .take(8)
+            .map(|p| {
+                vec![
+                    ui::ellipsize(&short_path(&p.project), 40),
+                    ui::paint(ui::SAVED, m(p.saved())),
+                    ui::bar(p.saved() as f64 / top as f64, 16),
+                    format!("{:.0}%", p.saved_percent()),
+                    ui::thousands(p.events),
+                ]
+            })
+            .collect();
+        out.push_str(&ui::table(
+            &["project", "saved", "", "rate", "runs"],
+            &[
+                Align::Left,
+                Align::Right,
+                Align::Left,
+                Align::Right,
+                Align::Right,
+            ],
+            &rows,
+        ));
+        if usage.projects.len() > 8 {
+            out.push_str(&format!(
+                "{}\n",
+                ui::detail(format!("{} more project(s)", usage.projects.len() - 8))
+            ));
+        }
+    }
+
+    out.push_str(&render_gain_folder(v));
+
+    if usage.skipped_lines > 0 {
+        out.push_str(&format!(
+            "\n{}\n",
+            ui::warn(format!(
+                "{} unreadable record(s) skipped — the totals are that much low",
+                usage.skipped_lines
+            ))
+        ));
+    }
+    out.push('\n');
+    out.push_str(&format!(
+        "  {}  {}  {}\n",
+        ui::paint(ui::CODE, "ttk gain --project"),
+        ui::paint(ui::CODE, "ttk gain --days 30"),
+        ui::paint(ui::CODE, "ttk global --open"),
+    ));
+    if est {
+        out.push_str(&format!(
+            "  {}\n",
+            ui::paint(
+                ui::DIM,
+                "`~` marks heuristic estimates; exact counts need a provider usage field."
+            )
+        ));
+    }
+    out
+}
+
+fn render_gain_folder(v: &GainView) -> String {
+    let Some(home) = &v.home else {
+        return String::new();
+    };
+    let mut out = format!("{}\n", ui::heading("global folder"));
+    out.push_str(&format!(
+        "{}\n",
+        ui::kv("folder", ui::paint(ui::CODE, home.display()))
+    ));
+    out.push_str(&format!(
+        "{}\n",
+        ui::kv_note(
+            "global filters",
+            format!(
+                "{} rule{} in {} file{}",
+                v.filter_rules,
+                if v.filter_rules == 1 { "" } else { "s" },
+                v.filter_files,
+                if v.filter_files == 1 { "" } else { "s" }
+            ),
+            format!(
+                "{}{}",
+                ttk_core::config::GLOBAL_FILTERS_DIR,
+                std::path::MAIN_SEPARATOR
+            )
+        )
+    ));
+    out.push_str(&format!(
+        "{}\n",
+        ui::kv_note(
+            "savings ledger",
+            ttk_store::usage::USAGE_FILE,
+            "every run in every project, local only"
+        )
+    ));
+    out
+}
+
+/// `/home/me/work/api` → `~/work/api`, and a Windows path likewise.
+///
+/// Shortening is cosmetic, so it gives up rather than guessing whenever the
+/// home directory is not a prefix.
+pub(crate) fn short_path(path: &str) -> String {
+    let Some(home) = dirs::home_dir() else {
+        return path.to_string();
+    };
+    let home = home.display().to_string();
+    match path.strip_prefix(&home) {
+        Some(rest) => format!("~{rest}"),
+        None => path.to_string(),
     }
 }
 
@@ -458,7 +1127,10 @@ fn weaker(a: CountMethod, b: CountMethod) -> CountMethod {
     if rank(a) <= rank(b) { a } else { b }
 }
 
-/// One-line summary printed after `ttk run`.
+/// The one line summary printed on stderr after `ttk run` / `ttk compile`.
+///
+/// It goes to stderr on purpose: stdout carries the compiled output, and a
+/// summary mixed into it would end up inside whatever the caller pipes it to.
 pub fn one_line(before: TokenCount, after: TokenCount, capsule: Option<&str>) -> String {
     let saved = before.saved_against(after);
     let pct = if before.value == 0 {
@@ -466,10 +1138,51 @@ pub fn one_line(before: TokenCount, after: TokenCount, capsule: Option<&str>) ->
     } else {
         saved.value as f64 * 100.0 / before.value as f64
     };
+    let arrow = ui::glyphs().arrow;
+    let head = format!(
+        "{}  {} {arrow} {} tokens  {}  {}",
+        ui::paint(ui::ACCENT, "ttk"),
+        before,
+        ui::paint(ui::NUM, after),
+        ui::bar(pct / 100.0, 16),
+        ui::paint(
+            if pct >= 25.0 { ui::OK } else { ui::DIM },
+            format!("-{pct:.0}%")
+        ),
+    );
     match capsule {
-        Some(c) => format!("ttk: {before} → {after} tokens (-{pct:.0}%), full output: {c}"),
-        None => format!("ttk: {before} → {after} tokens (-{pct:.0}%)"),
+        Some(c) => format!("{head}  {}", ui::paint(ui::DIM, c)),
+        None => head,
     }
+}
+
+/// Why the output looks the way it does, when it is not just "a compiler ran".
+///
+/// A pointer to an earlier run is surprising enough that it has to say so
+/// unprompted: an agent seeing `[repeat]` for the first time should not have to
+/// guess whether its command actually ran.
+pub fn winner_line(winner: &str) -> Option<String> {
+    let note = match winner {
+        "repeat.suppress" => "the command ran and produced byte-identical output to an earlier run",
+        "delta.lines" => "only what changed since the earlier run is shown",
+        _ => return None,
+    };
+    Some(format!("     {}", ui::paint(ui::DIM, note)))
+}
+
+/// The second stderr line, present only when learned rules actually fired.
+pub fn filter_line(filtered: &ttk_learn::Filtered) -> String {
+    format!(
+        "     {}",
+        ui::paint(
+            ui::DIM,
+            format!(
+                "learned filter: -{} line(s) via {} rule(s) — ttk rules",
+                filtered.removed_lines,
+                filtered.by_rule.len()
+            )
+        )
+    )
 }
 
 #[cfg(test)]
@@ -548,7 +1261,7 @@ mod tests {
             "a rejected step cannot claim a saving"
         );
         assert_eq!(r.by_transformer[0].rejected, 1);
-        assert!(r.render().contains("fallback x1"));
+        assert!(r.render().contains("fell back x1"), "{}", r.render());
     }
 
     #[test]
@@ -564,7 +1277,7 @@ mod tests {
         let r = GainReport::build("se_x", &[]);
         assert_eq!(r.saved(), 0);
         assert_eq!(r.saved_percent(), 0.0);
-        assert!(r.render().contains("tokens before"));
+        assert!(r.render().contains("tokens"), "{}", r.render());
     }
 
     #[test]
@@ -600,7 +1313,7 @@ mod tests {
     #[test]
     fn empty_stats_render_a_hint_instead_of_zeroes() {
         let text = StatsReport::default().render();
-        assert!(text.contains("nothing recorded yet"), "{text}");
+        assert!(text.contains("nothing recorded"), "{text}");
         assert_eq!(StatsReport::default().saved_percent(), 0.0);
     }
 
@@ -612,6 +1325,37 @@ mod tests {
         );
         assert_eq!(program_of("/usr/bin/cargo test"), "cargo");
         assert_eq!(program_of(""), "(unknown)");
+    }
+
+    #[test]
+    fn the_global_report_leads_with_one_number() {
+        let mut usage = ttk_store::GlobalUsage {
+            events: 3,
+            tokens_before: 1000,
+            tokens_after: 100,
+            method: "estimated".into(),
+            ..Default::default()
+        };
+        usage.projects.push(ttk_store::ProjectUsage {
+            project: "/work/api".into(),
+            project_id: "abc".into(),
+            events: 3,
+            tokens_before: 1000,
+            tokens_after: 100,
+            ..Default::default()
+        });
+        let text = render_global(&usage);
+        assert!(text.contains("everywhere"), "{text}");
+        assert!(text.contains("by project"), "{text}");
+        assert!(text.contains("/work/api"), "{text}");
+        assert!(text.contains('~'), "estimates stay marked: {text}");
+    }
+
+    #[test]
+    fn an_empty_global_report_says_how_to_fill_it() {
+        let text = render_global(&ttk_store::GlobalUsage::default());
+        assert!(text.contains("ttk run"), "{text}");
+        assert!(!text.contains("by project"), "no empty table: {text}");
     }
 
     #[test]
@@ -631,6 +1375,12 @@ mod tests {
         );
         assert!(s.contains("-75%"), "{s}");
         assert!(s.contains("cap://cap_1"));
-        assert!(s.contains('~'));
+        assert!(s.contains('~'), "an estimate stays marked as one");
+    }
+
+    #[test]
+    fn a_zero_token_input_does_not_divide_by_zero() {
+        let s = one_line(TokenCount::estimated(0), TokenCount::estimated(0), None);
+        assert!(s.contains("-0%"), "{s}");
     }
 }
