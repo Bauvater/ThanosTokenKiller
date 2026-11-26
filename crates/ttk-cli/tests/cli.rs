@@ -1091,7 +1091,12 @@ fn a_lesson_taught_from_the_last_run_fires_on_the_next_one() {
         stdout(&again),
         stderr(&again)
     );
-    assert!(stdout(&again).contains("added 412 packages"));
+    assert!(
+        stdout(&again).contains("added 412 packages"),
+        "stdout: {:?} stderr: {:?}",
+        stdout(&again),
+        stderr(&again)
+    );
     assert!(
         stderr(&again).contains("learned filter"),
         "{}",
