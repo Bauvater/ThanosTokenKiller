@@ -92,7 +92,11 @@ fn load_rules(ws: &Workspace, config: &Config) -> Result<Option<ttk_learn::Layer
 ///
 /// Hits are recorded in whichever file the rule lives in, so a project rule and
 /// a user rule keep separate books.
-fn record_filter_hits(ws: &Workspace, config: &Config, out: &PipelineOutput) -> Result<()> {
+pub(crate) fn record_filter_hits(
+    ws: &Workspace,
+    config: &Config,
+    out: &PipelineOutput,
+) -> Result<()> {
     let Some(filtered) = &out.filtered else {
         return Ok(());
     };
@@ -103,43 +107,26 @@ fn record_filter_hits(ws: &Workspace, config: &Config, out: &PipelineOutput) -> 
     let mut files = vec![ttk_learn::project_rules_path(ws.root())];
     files.extend(ttk_learn::user_rule_files());
     for path in files {
-        let mut set = ttk_learn::RuleSet::load(&path)?;
-        if set.is_empty() {
+        if !path.is_file() {
             continue;
         }
-        let before = set.to_json();
-        ttk_learn::record(&mut set, filtered, now);
-        if set.to_json() != before {
-            set.save(&path)?;
-        }
+        // Load, count and save under the file's lock: parallel commands
+        // firing the same rule must each add their hits, not overwrite them.
+        // Statistics are not a new version of the rules, so no snapshot.
+        ttk_learn::with_lock(&path, || {
+            let mut set = ttk_learn::RuleSet::load(&path)?;
+            if set.is_empty() {
+                return Ok(());
+            }
+            let before = set.to_json();
+            ttk_learn::record(&mut set, filtered, now);
+            if set.to_json() != before {
+                set.save(&path)?;
+            }
+            Ok(())
+        })?;
     }
     Ok(())
-}
-
-/// Record one captured command in the global ledger.
-///
-/// Best effort by design: a statistic that cannot be written must never fail
-/// the command the user actually ran, so a failure is one line on stderr.
-fn record_global_usage(out: &PipelineOutput, program: Option<String>) {
-    let Some(ledger) = ttk_store::UsageLedger::open() else {
-        return;
-    };
-    let cwd = std::env::current_dir().unwrap_or_default();
-    let root = ttk_core::config::find_project_root(&cwd).unwrap_or(cwd);
-    let record = ttk_store::RunRecord {
-        at_millis: out.event.timestamp_millis,
-        project: root.display().to_string(),
-        project_id: ttk_store::usage::project_id(&root),
-        program,
-        tokens_before: out.event.tokens_before().value,
-        tokens_after: out.event.tokens_after().value,
-        transformed: out.event.was_transformed(),
-        filtered_lines: out.filtered.as_ref().map_or(0, |f| f.removed_lines),
-        method: out.event.tokens_after().method.as_str().to_string(),
-    };
-    if let Err(e) = ledger.append(&record) {
-        errln!("{}", ui::warn(format!("global usage not recorded: {e}")));
-    }
 }
 
 fn resolve_session(ws: &Workspace, wanted: &str) -> Result<SessionId> {
@@ -222,6 +209,7 @@ pub enum InstallerHook {
 }
 
 /// Write the agent instruction block into `CLAUDE.md` / `AGENTS.md`.
+#[allow(clippy::too_many_arguments)]
 pub fn install(
     ctx: &Context,
     target: Option<&str>,
@@ -230,6 +218,7 @@ pub fn install(
     dry_run: bool,
     setup_path: bool,
     compact: bool,
+    hooks: bool,
 ) -> Result<i32> {
     use crate::install::{Action, Agent, Scope, apply, choose, confirm, targets};
     use crate::path_env::{self, PathOutcome};
@@ -346,6 +335,16 @@ pub fn install(
             "\nEach file keeps its own content; only the block between the ttk markers\n\
              is added or refreshed."
         );
+        outln!("and write `ttk.md` (the rules the block imports) next to each file.");
+        if hooks && targets.iter().any(|t| t.agent == Agent::ClaudeCode) {
+            outln!("\nand register `ttk hook` in Claude Code's settings (other hooks are kept):");
+            for t in targets.iter().filter(|t| t.agent == Agent::ClaudeCode) {
+                outln!(
+                    "  {}",
+                    crate::claude_hooks::settings_path_for(&t.path, t.global).display()
+                );
+            }
+        }
         if let Some(dir) = &binary_dir {
             outln!(
                 "\nand put this directory on your user PATH:\n  {}\n\
@@ -378,6 +377,25 @@ pub fn install(
         }
     }
 
+    // Hooks: the technical half of the install. The instruction block asks
+    // the agent to use ttk; the hooks make it happen whether it remembers or
+    // not, in every session, after every compaction and in every subagent.
+    let mut hook_results = Vec::new();
+    let mut competing = Vec::new();
+    if hooks {
+        let command = crate::claude_hooks::hook_command();
+        for t in targets.iter().filter(|t| t.agent == Agent::ClaudeCode) {
+            let path = crate::claude_hooks::settings_path_for(&t.path, t.global);
+            match crate::claude_hooks::install(&path, &command, dry_run) {
+                Ok(a) => {
+                    competing.extend(crate::claude_hooks::competing_hooks(&path));
+                    hook_results.push((path, a));
+                }
+                Err(e) => errln!("{}", ui::warn(format!("hooks not installed: {e}"))),
+            }
+        }
+    }
+
     // PATH comes last: a failure here must not undo the agent files that were
     // already written, and it is reported rather than swallowed.
     let path_outcome = match &binary_dir {
@@ -404,6 +422,11 @@ pub fn install(
                     "action": a.as_str(),
                 }))
                 .collect::<Vec<_>>(),
+            "hooks": hook_results
+                .iter()
+                .map(|(p, a)| json!({"settings": p.display().to_string(), "action": a.as_str()}))
+                .collect::<Vec<_>>(),
+            "competing_hooks": competing,
             "path_setup": path_outcome.as_ref().map(|o| json!({
                 "outcome": o.as_str(),
                 "detail": o.detail(),
@@ -421,6 +444,24 @@ pub fn install(
             action.as_str(),
             t.path.display(),
             if dry_run { "   (dry run)" } else { "" }
+        );
+    }
+    for (p, a) in &hook_results {
+        outln!(
+            "{:<20} {}{}",
+            a.as_str(),
+            p.display(),
+            if dry_run { "   (dry run)" } else { "" }
+        );
+    }
+    for c in &competing {
+        outln!(
+            "{}",
+            ui::warn(format!(
+                "another hook also rewrites shell commands or output ({c}); both run in \
+                 parallel. ttk compiles whatever output arrives, so they stack, but if you \
+                 see doubled processing, remove one of them"
+            ))
         );
     }
     if let (Some(outcome), Some(dir)) = (&path_outcome, &binary_dir) {
@@ -444,7 +485,9 @@ pub fn install(
     } else if files_unchanged && !path_changed {
         outln!("\nalready set up — nothing to do");
     } else {
-        outln!("\ndone. Your agent now knows to run commands through `ttk run --`.");
+        outln!(
+            "\ndone. ttk.md is in place, and the hooks compile tool output from the next session on."
+        );
         if path_changed {
             outln!("Open a new terminal so the updated PATH takes effect.");
         }
@@ -698,6 +741,45 @@ pub fn doctor(ctx: &Context) -> Result<i32> {
         ),
     }
 
+    // Enforcement: are the Claude Code hooks registered, and where?
+    {
+        let mut places = Vec::new();
+        if let Some(global) = crate::install::Agent::ClaudeCode.global_path() {
+            let p = crate::claude_hooks::settings_path_for(&global, true);
+            if crate::claude_hooks::installed(&p) {
+                places.push(format!("global ({})", p.display()));
+            }
+        }
+        if let Some(root) = ttk_core::config::find_project_root(&std::env::current_dir()?) {
+            let p = root.join(".claude").join("settings.json");
+            if crate::claude_hooks::installed(&p) {
+                places.push(format!("project ({})", p.display()));
+            }
+        }
+        if places.is_empty() {
+            outln!(
+                "{}",
+                ui::kv("claude hooks", ui::paint(ui::WARN, "not installed"))
+            );
+            outln!(
+                "{}",
+                ui::hint(
+                    "output is only compiled via `ttk run`; add them with",
+                    "ttk install"
+                )
+            );
+        } else {
+            outln!(
+                "{}",
+                ui::kv_note(
+                    "claude hooks",
+                    ui::paint(ui::OK, "installed"),
+                    places.join(", ")
+                )
+            );
+        }
+    }
+
     // The upgrade trap: an older copy earlier on the PATH means typing `ttk`
     // starts that one, whatever was just installed.
     if let Ok(me) = std::env::current_exe()
@@ -767,19 +849,74 @@ pub fn config(ctx: &Context, paths_only: bool) -> Result<i32> {
 // ---------------------------------------------------------------------------
 
 pub fn run(ctx: &Context, argv: &[String], stream: bool) -> Result<i32> {
-    let (config, ws) = ctx.workspace()?;
+    // The configuration first, the command second, the workspace last.
+    //
+    // The workspace holds the capsule index, which admits one process at a
+    // time. Opening it before the command would hold it for as long as the
+    // command runs — a whole `cargo test` — and every other `ttk` an agent
+    // starts in parallel in the same project would have to wait for it. Opened
+    // afterwards, it is held for the milliseconds it takes to store one output.
+    // Inside a command an outer `ttk run` is capturing: the outer one compiles
+    // and counts this output, so doing either here would count it twice.
+    if runner::is_nested() {
+        return runner::run_transparent(argv);
+    }
+    let (config, _) = ctx.load()?;
     let captured = runner::run(argv, config.limits.max_capture_bytes, stream)?;
     let content = captured.combined();
+    let exit_code = captured.context.exit_code.unwrap_or(1);
 
+    // Whatever goes wrong from here on is ttk's problem, not the command's:
+    // the output and the exit code are delivered regardless.
+    if let Err(e) = deliver_run(ctx, &config, &captured, &content, stream) {
+        if ctx.json {
+            ctx.print_json(json!({
+                "command": captured.context.command_line(),
+                "exit_code": captured.context.exit_code,
+                "content": content,
+                "ttk_error": e.to_string(),
+            }))?;
+        } else {
+            if !stream {
+                let mut stdout = std::io::stdout().lock();
+                stdout.write_all(content.as_bytes())?;
+                if !content.ends_with('\n') {
+                    stdout.write_all(b"\n")?;
+                }
+            }
+            errln!(
+                "{}",
+                ui::warn(format!(
+                    "ttk could not compile or store this output ({e}); it is shown unchanged"
+                ))
+            );
+        }
+    }
+
+    // Forward the child's exit code so `ttk run` is transparent in scripts.
+    Ok(exit_code)
+}
+
+/// Compile, store, record and print one captured command.
+fn deliver_run(
+    ctx: &Context,
+    config: &Config,
+    captured: &runner::Captured,
+    content: &str,
+    stream: bool,
+) -> Result<()> {
+    let ws = Workspace::open(&std::env::current_dir()?, config)?;
     let session = session_id();
-    let rules = load_rules(&ws, &config)?;
-    let mut input = PipelineInput::new(&content, session).command(&captured.context);
+    let rules = load_rules(&ws, config)?;
+    let mut input = PipelineInput::new(content, session).command(&captured.context);
     if let Some(r) = &rules {
         input = input.rules(&r.merged);
     }
-    let out = pipeline::process(&ws, &config, input)?;
-    record_filter_hits(&ws, &config, &out)?;
-    record_global_usage(&out, captured.context.program());
+    let out = pipeline::process(&ws, config, input)?;
+    // Bookkeeping must never cost the user the output they asked for.
+    if let Err(e) = record_filter_hits(&ws, config, &out) {
+        errln!("{}", ui::warn(format!("rule statistics not updated: {e}")));
+    }
 
     if ctx.json {
         ctx.print_json(json!({
@@ -805,6 +942,7 @@ pub fn run(ctx: &Context, argv: &[String], stream: bool) -> Result<i32> {
             "filter_protected_lines": out.protected_lines,
             "winner": out.winner,
         }))?;
+        record_delivery(&out, captured.context.program(), "run", 0);
     } else {
         if !stream {
             let mut stdout = std::io::stdout().lock();
@@ -813,20 +951,8 @@ pub fn run(ctx: &Context, argv: &[String], stream: bool) -> Result<i32> {
                 stdout.write_all(b"\n")?;
             }
         }
-        errln!(
-            "{}",
-            report::one_line(
-                out.event.tokens_before(),
-                out.event.tokens_after(),
-                out.capsule_ref.as_deref()
-            )
-        );
-        if let Some(line) = out.winner.as_deref().and_then(report::winner_line) {
-            errln!("{line}");
-        }
-        if let Some(f) = &out.filtered {
-            errln!("{}", report::filter_line(f));
-        }
+        let notes = print_notes(&out);
+        record_delivery(&out, captured.context.program(), "run", notes);
         if out.protected_lines > 0 {
             errln!(
                 "{}",
@@ -854,12 +980,23 @@ pub fn run(ctx: &Context, argv: &[String], stream: bool) -> Result<i32> {
             );
         }
     }
-
-    // Forward the child's exit code so `ttk run` is transparent in scripts.
-    Ok(captured.context.exit_code.unwrap_or(1))
+    Ok(())
 }
 
 pub fn compile(ctx: &Context, file: Option<&str>, name: Option<&str>) -> Result<i32> {
+    if runner::is_nested() {
+        // The outer `ttk run` compiles and counts this; hand it through.
+        let buf = match file {
+            Some(path) => std::fs::read(path)?,
+            None => {
+                let mut buf = Vec::new();
+                std::io::stdin().read_to_end(&mut buf)?;
+                buf
+            }
+        };
+        std::io::stdout().write_all(&buf)?;
+        return Ok(0);
+    }
     let (config, ws) = ctx.workspace()?;
     let rules = load_rules(&ws, &config)?;
     let (content, hint) = match file {
@@ -883,8 +1020,9 @@ pub fn compile(ctx: &Context, file: Option<&str>, name: Option<&str>) -> Result<
         input = input.rules(&r.merged);
     }
     let out = pipeline::process(&ws, &config, input)?;
-    record_filter_hits(&ws, &config, &out)?;
-    record_global_usage(&out, None);
+    if let Err(e) = record_filter_hits(&ws, &config, &out) {
+        errln!("{}", ui::warn(format!("rule statistics not updated: {e}")));
+    }
 
     if ctx.json {
         ctx.print_json(json!({
@@ -906,27 +1044,73 @@ pub fn compile(ctx: &Context, file: Option<&str>, name: Option<&str>) -> Result<
             "filter_protected_lines": out.protected_lines,
             "winner": out.winner,
         }))?;
+        record_delivery(&out, None, "compile", 0);
     } else {
         out!("{}", out.content);
         if !out.content.ends_with('\n') {
             outln!();
         }
-        errln!(
-            "{}",
-            report::one_line(
-                out.event.tokens_before(),
-                out.event.tokens_after(),
-                out.capsule_ref.as_deref()
-            )
-        );
-        if let Some(line) = out.winner.as_deref().and_then(report::winner_line) {
-            errln!("{line}");
-        }
-        if let Some(f) = &out.filtered {
-            errln!("{}", report::filter_line(f));
-        }
+        let notes = print_notes(&out);
+        record_delivery(&out, None, "compile", notes);
     }
     Ok(0)
+}
+
+/// Print the summary lines that follow a compiled output; returns their
+/// estimated tokens. They reach the agent too (stderr is shown to it), so
+/// they are booked as ttk's overhead rather than silently left out.
+fn print_notes(out: &PipelineOutput) -> u64 {
+    let mut notes = vec![report::one_line(
+        out.event.tokens_before(),
+        out.event.tokens_after(),
+        out.capsule_ref.as_deref(),
+    )];
+    if let Some(line) = out.winner.as_deref().and_then(report::winner_line) {
+        notes.push(line);
+    }
+    if let Some(f) = &out.filtered {
+        notes.push(report::filter_line(f));
+    }
+    let mut overhead = 0;
+    for n in &notes {
+        errln!("{n}");
+        overhead += tokens::estimate(&ui::strip_ansi(n)).value;
+    }
+    overhead
+}
+
+/// Record one delivered output in the global ledger.
+fn record_delivery(
+    out: &PipelineOutput,
+    program: Option<String>,
+    via: &'static str,
+    overhead: u64,
+) {
+    record_delivery_sized(out, program, via, overhead, out.event.tokens_after().value);
+}
+
+fn record_delivery_sized(
+    out: &PipelineOutput,
+    program: Option<String>,
+    via: &'static str,
+    overhead: u64,
+    tokens_after: u64,
+) {
+    let cwd = std::env::current_dir().unwrap_or_default();
+    crate::attribution::record(
+        &crate::attribution::Attribution::from_env(via),
+        crate::attribution::Delivery {
+            id: Some(out.event.id.to_string()),
+            program,
+            tokens_before: out.event.tokens_before().value,
+            tokens_after,
+            overhead,
+            cause: "output",
+            filtered_lines: out.filtered.as_ref().map_or(0, |f| f.removed_lines),
+            kind: ttk_store::RecordKind::Run,
+            cwd: &cwd,
+        },
+    );
 }
 
 /// `ttk read` — a file, through the same machinery as a command's output.
@@ -967,8 +1151,9 @@ pub fn read(ctx: &Context, path: &str, outline: bool, lines: Option<&str>) -> Re
         input = input.rules(&r.merged);
     }
     let out = pipeline::process(&ws, &config, input)?;
-    record_filter_hits(&ws, &config, &out)?;
-    record_global_usage(&out, Some("ttk-read".to_string()));
+    if let Err(e) = record_filter_hits(&ws, &config, &out) {
+        errln!("{}", ui::warn(format!("rule statistics not updated: {e}")));
+    }
 
     // A line range is a plain slice of the file, no interpretation at all.
     if let Some(range) = lines {
@@ -980,6 +1165,14 @@ pub fn read(ctx: &Context, path: &str, outline: bool, lines: Option<&str>) -> Re
             .map(|(i, l)| format!("{}: {l}\n", i + 1))
             .collect();
         out!("{sliced}");
+        // What the agent received is the slice, not the file.
+        record_delivery_sized(
+            &out,
+            Some("ttk-read".to_string()),
+            "read",
+            0,
+            tokens::estimate(&sliced).value,
+        );
         return Ok(0);
     }
 
@@ -1000,7 +1193,9 @@ pub fn read(ctx: &Context, path: &str, outline: bool, lines: Option<&str>) -> Re
         out.content.clone()
     };
 
+    let view_tokens = tokens::estimate(&view).value;
     if ctx.json {
+        record_delivery_sized(&out, Some("ttk-read".to_string()), "read", 0, view_tokens);
         return ctx.print_json(json!({
             "path": path,
             "content": view,
@@ -1017,13 +1212,19 @@ pub fn read(ctx: &Context, path: &str, outline: bool, lines: Option<&str>) -> Re
     if !view.ends_with('\n') {
         outln!();
     }
-    errln!(
-        "{}",
-        report::one_line(
-            out.event.tokens_before(),
-            tokens::estimate(&view),
-            out.capsule_ref.as_deref()
-        )
+    let line = report::one_line(
+        out.event.tokens_before(),
+        tokens::estimate(&view),
+        out.capsule_ref.as_deref(),
+    );
+    errln!("{line}");
+    // The outline's view, not the compiled file, is what was delivered.
+    record_delivery_sized(
+        &out,
+        Some("ttk-read".to_string()),
+        "read",
+        tokens::estimate(&ui::strip_ansi(&line)).value,
+        view_tokens,
     );
     if outline {
         errln!(
@@ -1123,6 +1324,52 @@ pub fn usage_command(ctx: &Context, action: UsageAction) -> Result<i32> {
             outln!("{}", ledger.path().display());
             Ok(0)
         }
+        UsageAction::Sync { dir } => {
+            let store = ttk_store::ProviderStore::open()
+                .ok_or_else(|| Error::other("no global ttk folder on this platform"))?;
+            let root = match dir {
+                Some(d) => std::path::PathBuf::from(d),
+                None => ttk_store::provider::claude_projects_dir()
+                    .ok_or_else(|| Error::other("no home directory"))?,
+            };
+            if !root.is_dir() {
+                return Err(Error::other(format!(
+                    "no transcripts at {} — nothing to import",
+                    root.display()
+                )));
+            }
+            let stats = store.import_tree(&root)?;
+            let usage = store.aggregate()?;
+            if ctx.json {
+                return ctx.print_json(json!({
+                    "files_read": stats.files,
+                    "new_responses": stats.records,
+                    "skipped_lines": stats.skipped_lines,
+                    "responses": usage.totals.messages,
+                    "sessions": usage.sessions,
+                    "total_tokens": usage.totals.total(),
+                    "path": store.path().display().to_string(),
+                }));
+            }
+            outln!(
+                "{}",
+                ui::ok(format!(
+                    "{} new response(s) from {} transcript(s); {} responses in {} sessions in total",
+                    stats.records,
+                    stats.files,
+                    ui::thousands(usage.totals.messages),
+                    ui::thousands(usage.sessions)
+                ))
+            );
+            outln!(
+                "{}",
+                ui::detail(format!(
+                    "measured: {} tokens consumed — provider-reported, never mixed with ttk's estimates",
+                    ui::thousands(usage.totals.total())
+                ))
+            );
+            Ok(0)
+        }
         UsageAction::Compact { retain_days } => {
             let stats = ledger.compact(retain_days, ttk_core::ids::now_millis())?;
             if ctx.json {
@@ -1164,9 +1411,45 @@ pub fn usage_command(ctx: &Context, action: UsageAction) -> Result<i32> {
     }
 }
 
+/// `ttk guide`: the rule file every agent follows.
+pub fn guide(core: bool) -> Result<i32> {
+    if core {
+        outln!("{}", crate::guide::agent_context());
+    } else {
+        out!("{}", crate::guide::TTK_MD);
+    }
+    Ok(0)
+}
+
+/// `ttk install --remove-hooks`.
+pub fn remove_hooks(ctx: &Context, scope: Option<&str>, dry_run: bool) -> Result<i32> {
+    use crate::install::{Agent, Scope, targets};
+    let cwd = std::env::current_dir()?;
+    let root = ttk_core::config::find_project_root(&cwd).unwrap_or(cwd);
+    let scope = scope.map(Scope::parse).transpose()?.unwrap_or(Scope::Both);
+    let mut done = Vec::new();
+    for t in targets(&[Agent::ClaudeCode], scope, &root) {
+        let path = crate::claude_hooks::settings_path_for(&t.path, t.global);
+        let action = crate::claude_hooks::uninstall(&path, dry_run)?;
+        done.push((path, action));
+    }
+    if ctx.json {
+        return ctx.print_json(json!(
+            done.iter()
+                .map(|(p, a)| json!({"settings": p.display().to_string(), "action": a.as_str()}))
+                .collect::<Vec<_>>()
+        ));
+    }
+    for (p, a) in done {
+        outln!("{:<20} {}", a.as_str(), p.display());
+    }
+    Ok(0)
+}
+
 /// What `ttk usage` can do. Mirrored in `main.rs`.
 pub enum UsageAction {
     Path,
+    Sync { dir: Option<String> },
     Compact { retain_days: u64 },
     Forget { project: Option<String>, all: bool },
 }
@@ -1210,6 +1493,7 @@ pub fn gain(ctx: &Context, args: &GainArgs) -> Result<i32> {
     let today = ttk_store::usage::day_number(ttk_core::ids::now_millis(), offset);
     let daily = ledger.daily(offset, project_id.as_deref())?;
     let (filter_files, filter_rules) = global_filter_counts();
+    let measured = ttk_store::ProviderStore::open().and_then(|s| s.aggregate().ok());
 
     if ctx.json {
         let window = |n: i64| {
@@ -1229,6 +1513,18 @@ pub fn gain(ctx: &Context, args: &GainArgs) -> Result<i32> {
             "tokens_after": usage.tokens_after,
             "saved": usage.saved(),
             "saved_percent": usage.saved_percent(),
+            "overhead": usage.overhead,
+            "net": usage.net(),
+            "passthrough": usage.passthrough,
+            "duplicates": usage.duplicates,
+            "overhead_by_cause": usage.overhead_by_cause,
+            "sessions": usage.sessions.len(),
+            "measured": measured.as_ref().map(|m| json!({
+                "messages": m.totals.messages, "total": m.totals.total(),
+                "input": m.totals.input, "output": m.totals.output,
+                "cache_read": m.totals.cache_read, "cache_creation": m.totals.cache_creation,
+                "sessions": m.sessions,
+            })),
             "method": usage.method,
             "projects": usage.projects.len(),
             "filtered_lines": usage.filtered_lines,
@@ -1256,6 +1552,7 @@ pub fn gain(ctx: &Context, args: &GainArgs) -> Result<i32> {
         home: ttk_core::config::global_home(),
         filter_files,
         filter_rules,
+        measured: measured.as_ref(),
     };
     out!("{}", report::render_gain(&view));
     Ok(0)
@@ -1269,8 +1566,12 @@ fn narrow_to_project(usage: &mut ttk_store::GlobalUsage, project_id: &str) {
     usage.tokens_before = p.map_or(0, |p| p.tokens_before);
     usage.tokens_after = p.map_or(0, |p| p.tokens_after);
     usage.filtered_lines = p.map_or(0, |p| p.filtered_lines);
+    usage.overhead = p.map_or(0, |p| p.overhead);
+    usage.passthrough = p.map_or(0, |p| p.passthrough);
     usage.first_millis = p.map(|p| p.first_millis);
     usage.last_millis = p.map(|p| p.last_millis);
+    let name = p.map(|p| p.project.clone()).unwrap_or_default();
+    usage.sessions.retain(|s| s.project == name);
 }
 
 /// Global filter files, and the rules they hold between them.
@@ -1654,7 +1955,21 @@ pub fn retrieve(
     if !text.ends_with('\n') {
         outln!();
     }
+    book_retrieval(&text);
     Ok(0)
+}
+
+/// Content fetched back from a capsule re-enters the agent's context: the
+/// compiled view was not enough this time. That is the honest price of every
+/// saving, so it is booked against them as overhead.
+fn book_retrieval(text: &str) {
+    crate::attribution::record_overhead(
+        &crate::attribution::Attribution::from_env("retrieve"),
+        &std::env::current_dir().unwrap_or_default(),
+        tokens::estimate(text).value,
+        "retrieve",
+        None,
+    );
 }
 
 fn parse_range(range: &str) -> Result<(usize, usize)> {
@@ -1691,9 +2006,12 @@ pub fn search(
                 .collect::<Vec<_>>()
         ))?;
     } else {
+        let mut shown = String::new();
         for (n, line) in &hits {
             outln!("{}{line}", ui::paint(ui::DIM, format!("{n}: ")));
+            shown.push_str(&format!("{n}: {line}\n"));
         }
+        book_retrieval(&shown);
         if hits.is_empty() {
             errln!("{}", ui::bad(format!("no match for `{needle}`")));
             return Ok(1);
@@ -1706,6 +2024,7 @@ pub fn raw(ctx: &Context, capsule: &str, allow_secrets: bool) -> Result<i32> {
     let (_, ws) = ctx.workspace()?;
     let bytes = ws.capsules().raw(capsule, allow_secrets)?;
     std::io::stdout().lock().write_all(&bytes)?;
+    book_retrieval(&String::from_utf8_lossy(&bytes));
     Ok(0)
 }
 

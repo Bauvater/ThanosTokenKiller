@@ -138,6 +138,10 @@ pub struct Annotated {
     /// silently dropping the agent's work would be worse — but the caller is
     /// expected to say so.
     pub unclosed: bool,
+    /// Estimated tokens of the whole annotated document, tags included: what
+    /// the lesson cost the agent to write. Zero for an `Annotated` that was
+    /// not produced by [`parse`].
+    pub text_tokens: u64,
 }
 
 impl Annotated {
@@ -237,6 +241,7 @@ pub fn parse(text: &str) -> Annotated {
     }
 
     out.unclosed = open.is_some();
+    out.text_tokens = ttk_core::tokens::estimate(text).value;
     out
 }
 

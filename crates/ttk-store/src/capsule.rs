@@ -209,6 +209,48 @@ pub struct StoreStats {
     pub original_bytes: u64,
 }
 
+/// How long a process waits for another `ttk` to release the capsule index.
+///
+/// An agent routinely runs several commands at once in the same project, and
+/// the index admits one process at a time. Each holds it only for the few
+/// milliseconds of compiling and storing one output, so waiting is always
+/// right and failing never is. `TTK_LOCK_WAIT_MS` overrides it.
+const DEFAULT_LOCK_WAIT_MS: u64 = 30_000;
+
+fn lock_wait() -> std::time::Duration {
+    let ms = std::env::var("TTK_LOCK_WAIT_MS")
+        .ok()
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or(DEFAULT_LOCK_WAIT_MS);
+    std::time::Duration::from_millis(ms)
+}
+
+/// Open the index, waiting while another process holds it.
+fn open_shared(index_path: &Path) -> Result<Database> {
+    let deadline = std::time::Instant::now() + lock_wait();
+    // Short at first, so the common case of a brief overlap costs nothing
+    // noticeable; capped, so a long wait does not spin. The process id
+    // offsets the rhythm so waiting processes do not retry in lockstep.
+    let mut pause = 5 + u64::from(std::process::id() % 7);
+    loop {
+        match Database::create(index_path) {
+            Ok(db) => return Ok(db),
+            Err(redb::DatabaseError::DatabaseAlreadyOpen)
+                if std::time::Instant::now() < deadline =>
+            {
+                std::thread::sleep(std::time::Duration::from_millis(pause));
+                pause = (pause * 2).min(100);
+            }
+            Err(e) => {
+                return Err(Error::storage(format!(
+                    "cannot open capsule index {}: {e}",
+                    index_path.display()
+                )));
+            }
+        }
+    }
+}
+
 pub struct CapsuleStore {
     db: Database,
     blobs: BlobStore,
@@ -220,8 +262,7 @@ impl CapsuleStore {
         if let Some(parent) = index_path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let db = Database::create(index_path)
-            .map_err(|e| Error::storage(format!("cannot open capsule index: {e}")))?;
+        let db = open_shared(index_path)?;
         // Create the tables up front so read transactions never fail on a
         // fresh store.
         {

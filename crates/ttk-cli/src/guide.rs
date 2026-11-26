@@ -39,93 +39,47 @@ it and returns the original untouched. That is the intended behaviour.
 All numbers use the built-in heuristic estimator (`~`), measured end to end
 through the CLI. They are single measurements, not a benchmark suite.";
 
-/// The teaching loop, written once and reused by every surface that explains
-/// it. Wording here ends up in an agent's instruction file, so it is phrased as
-/// an instruction rather than as a description.
-pub const LEARNING_BLOCK: &str = r#"### Teach it what is worthless
-
-ttk does not ship a fixed list of filters. **You** write them, by marking the
-lines you never want to see again:
-
-```bash
-ttk run -- npm install            # you see forty deprecation warnings
-ttk learn --last <<'EOF'
-<filter-trash>
-npm WARN deprecated inflight@1.0.6: This module is not supported
-npm WARN deprecated glob@7.2.3: Glob versions prior to v9 are unsupported
-</filter-trash>
-added 412 packages in 9s
-EOF
-```
-
-From now on those lines are removed from every `npm install` in this project,
-before you ever see them, and the rule is stored in
-`.ttk/learned-filters.json` for everyone on the team.
-
-Rules for teaching:
-
-1. **Paste back the whole output**, not only the junk. Everything you leave
-   unmarked becomes a counter-example, and that is what stops a rule from
-   growing teeth. A lesson with no unmarked text is a lesson with no brakes.
-2. **Mark noise, never evidence.** Errors, failures, exit codes, stack traces
-   and line references are refused outright — that is deliberate, not a bug.
-3. **One command, one lesson.** `--last` takes the scope from the command that
-   produced the output, so a rule about `npm install` never fires on `cargo`.
-   Use `--global` only for noise that genuinely appears everywhere.
-4. **If a rule removes something useful**, mark that line with
-   `<filter-keep>…</filter-keep>` and teach again: the offending rule retires.
-5. **Mark whole banners too.** Output that no single line describes — a boxed
-   header, an ASCII logo — is learned as one *block* rule that removes the run
-   as a whole. Just mark all of its lines together; nothing extra to type.
-6. **Three more tags, when deleting is the wrong answer:**
-   `<filter-fold as="npm: 40 deprecation warnings">…</filter-fold>` keeps a one
-   line summary instead of nothing; `<filter-only>…</filter-only>` says *these
-   are the only lines worth keeping* for this command, which is far cheaper to
-   teach when output is 99% noise.
-7. **`ttk suggest` does the noticing for you.** It reads what ttk already
-   stored and drafts a lesson from the shapes that keep coming back. Read the
-   draft, delete anything you want to keep, then pipe it into `ttk learn`.
-8. `ttk rules` shows what has been learned and what each rule has saved;
-   `ttk filter --explain` dry runs the rules over text without changing
-   anything."#;
-
-/// The compact block: the same instructions, an eighth of the tokens.
+/// The central rule file, `ttk.md`, exactly as shipped in the repository.
 ///
-/// The full block is around 800 tokens, and it is in **every request** an agent
-/// makes for the rest of the session. A tool whose job is to remove tokens
-/// should be embarrassed about that, and on a long session the full block can
-/// cost more than it saves on a short one. This is what survives when only the
-/// load bearing sentences are kept.
-pub fn agent_block_compact(agent: Agent) -> String {
-    let run_hint = match agent {
-        Agent::ClaudeCode => "Bash tool calls",
-        Agent::Codex => "shell commands",
-    };
+/// It is written next to every instruction file `ttk install` touches, and
+/// `ttk guide` prints it. One file, one source of truth: the CLAUDE.md block,
+/// the AGENTS.md block and the hook's injected context are all derived from it.
+pub const TTK_MD: &str = include_str!("../../../ttk.md");
+
+/// File name of the rule file beside an instruction file.
+pub const TTK_MD_FILE: &str = "ttk.md";
+
+/// The core rules: the part of `ttk.md` between its `ttk:core` markers.
+pub fn core_rules() -> &'static str {
+    let begin = "<!-- ttk:core -->";
+    let end = "<!-- /ttk:core -->";
+    match (TTK_MD.find(begin), TTK_MD.find(end)) {
+        (Some(b), Some(e)) if b < e => TTK_MD[b + begin.len()..e].trim(),
+        _ => TTK_MD,
+    }
+}
+
+/// What the hook injects at session start, after compaction and into every
+/// subagent. Short on purpose: it is paid for in every one of those contexts.
+pub fn agent_context() -> String {
     format!(
-        r#"## ThanosTokenKiller (`ttk`)
-
-Prefix {run_hint} with `ttk run --` for anything long: tests, builds, `git`,
-logs, package managers, `grep`. The exit code passes through unchanged. Pipe
-into `ttk compile`; read files with `ttk read --outline <path>`.
-
-You get compact output plus `raw=cap://…`. That is the byte exact original:
-`ttk retrieve <cap> --level 4`, `--lines A:B`, or `ttk search <cap> <text>`.
-Never re-run an expensive command to see more of it. Any `*_not_shown` field
-says exactly how much was left out. `<secret:…>` is a redacted credential —
-work with the placeholder.
-
-**Teach the filter.** Paste output back with junk wrapped in
-`<filter-trash>…</filter-trash>` and run `ttk learn --last`. Those lines never
-reach you again. Include the *whole* output: what you leave unmarked is the
-counter-example that stops a rule over-matching. Errors are refused on purpose.
-`<filter-fold as="what it was">…</filter-fold>` keeps a one line summary
-instead; `<filter-only>…</filter-only>` says these are the only lines worth
-keeping. Wrong rule? Mark the line `<filter-keep>` and teach again.
-
-`ttk suggest` drafts a lesson from what it has already seen. `ttk rules` shows
-what has been learned. `ttk gain` shows the running total.
-"#
+        "{}\nFull rules: `ttk.md` in the project or `ttk guide` (read it before teaching filters).",
+        core_rules()
     )
+}
+
+/// The compact block: only the core rules, plus where the rest lives.
+pub fn agent_block_compact(agent: Agent) -> String {
+    match agent {
+        Agent::ClaudeCode => agent_block(agent),
+        Agent::Codex => format!(
+            "## ThanosTokenKiller (`ttk`) — mandatory\n\n\
+             Every agent and subagent MUST read `{TTK_MD_FILE}` (next to this file) \
+             completely and follow it. Prefix shell commands with long output with \
+             `ttk run --`.\n\n{}\n",
+            core_rules()
+        ),
+    }
 }
 
 /// The block for one agent, full or compact.
@@ -138,92 +92,26 @@ pub fn agent_block_for(agent: Agent, compact: bool) -> String {
 }
 
 /// The markdown block written into `CLAUDE.md` / `AGENTS.md`.
+///
+/// Claude Code expands `@file` imports, so its block is two sentences and the
+/// import: the rules load with the instruction file, in every session and every
+/// subagent, without being copied into it. Codex has no imports, so it gets the
+/// rule file inline.
 pub fn agent_block(agent: Agent) -> String {
-    let run_hint = match agent {
-        Agent::ClaudeCode => "When you use the Bash tool, prefix the command with `ttk run --`.",
-        Agent::Codex => "When you run a shell command, prefix it with `ttk run --`.",
-    };
-
-    format!(
-        r#"## ThanosTokenKiller (`ttk`)
-
-This project uses **ThanosTokenKiller** to shrink verbose tool output before it
-reaches you. {run_hint}
-
-```bash
-ttk run -- cargo test          # instead of: cargo test
-ttk run -- pytest -q           # instead of: pytest -q
-ttk run -- git diff            # instead of: git diff
-kubectl logs deploy/api | ttk compile
-ttk read --outline src/main.rs # a file's declarations instead of the file
-ttk read --lines 40:80 src/main.rs
-```
-
-Reading the same unchanged file twice costs a pointer the second time, and so
-does running the same command twice: identical output collapses to
-`[repeat] identical to cap://…`, and mostly-identical output to a `[delta]` of
-what changed. Every error line travels with both, so a repeated *failure* still
-shows the failure.
-
-`ttk run` forwards the command's exit code unchanged, so `&&` chains and
-scripts keep working. Compile a file or a pipe with `ttk compile`.
-
-### What you get back
-
-A compact Token IR document instead of raw output:
-
-```text
-[test:pytest] status=fail
-failed=2 passed=812 skipped=4 duration=71.20s
-@fail#1 test=tests/auth/test_expiry.py::test_token_expiry at=tests/auth/test_expiry.py:87 error=AssertionError
-  assert 200 == 401
-raw=cap://cap_01KZ47VXAHH06PDQ4YJ559M002
-```
-
-Read it as: header line, then counters, then one `@section` per finding, then a
-pointer to the full original.
-
-### Nothing is lost — retrieve it when you need it
-
-The `raw=cap://…` line is a **capsule**: the byte exact original is stored
-locally. Whenever the compiled view is not enough, fetch more instead of
-re-running the command:
-
-```bash
-ttk retrieve <capsule> --level 4        # the complete original
-ttk retrieve <capsule> --lines 100:180  # a numbered slice
-ttk search   <capsule> "timeout"        # grep inside the original
-```
-
-Any field ending in `_not_shown` (`lines_not_shown`, `files_not_shown`, …)
-tells you exactly how much was left out.
-
-### Rules
-
-1. Prefer `ttk run --` for commands whose output is long: tests, builds, `git`,
-   logs, package managers, `grep`/`rg`.
-2. Do **not** wrap interactive commands, editors, or anything that needs a TTY.
-3. If output looks truncated or you need context around a hit, use
-   `ttk retrieve` / `ttk search` — never re-run an expensive command just to
-   see more of it.
-4. `<secret:…>` placeholders mean a credential was detected and kept local.
-   Never try to unmask one; work with the placeholder.
-5. `ttk gain` shows what ttk has saved across every project, `ttk stats` this
-   workspace in detail; `ttk explain <event>` shows what a compiler did and why.
-
-{LEARNING_BLOCK}
-
-### What it saves today
-
-{SAVINGS_TABLE}
-
-{SAVINGS_NOTE}
-
-The table above is what the built-in compilers do on their own. Learned filters
-are additive and project specific, so they have no table: `ttk rules` reports
-what yours have actually saved.
-"#
-    )
+    match agent {
+        Agent::ClaudeCode => format!(
+            "## ThanosTokenKiller (`ttk`) — mandatory\n\n\
+             **Every agent and every subagent MUST read `{TTK_MD_FILE}` completely and follow \
+             all of its instructions.** It is imported here so it is always loaded:\n\n\
+             @{TTK_MD_FILE}\n"
+        ),
+        Agent::Codex => format!(
+            "## ThanosTokenKiller (`ttk`) — mandatory\n\n\
+             Every agent and subagent MUST follow these rules (also in `{TTK_MD_FILE}`). \
+             Prefix shell commands with long output with `ttk run --`.\n\n{}\n",
+            TTK_MD.trim()
+        ),
+    }
 }
 
 /// The cheat sheet printed by `ttk help`.
@@ -551,88 +439,66 @@ mod tests {
     }
 
     #[test]
-    fn the_block_names_the_agents_own_workflow() {
-        assert!(agent_block(Agent::ClaudeCode).contains("Bash tool"));
-        assert!(agent_block(Agent::Codex).contains("shell command"));
-    }
-
-    #[test]
-    fn the_block_teaches_retrieval_not_just_compression() {
+    fn the_claude_block_is_mandatory_and_imports_the_rule_file() {
         let text = agent_block(Agent::ClaudeCode);
-        assert!(text.contains("ttk retrieve"));
-        assert!(text.contains("--level 4"));
-        assert!(text.contains("ttk search"));
-        assert!(text.contains("_not_shown"));
-        assert!(text.contains("<secret:"));
+        assert!(text.contains("MUST read `ttk.md` completely"));
+        assert!(text.contains("\n@ttk.md\n"), "{text}");
+        assert!(text.contains("subagent"));
+        // The block itself is small: the rules live in ttk.md.
+        assert!(text.len() < 400, "{}", text.len());
     }
 
     #[test]
-    fn the_savings_table_is_shared_everywhere() {
-        assert!(agent_block(Agent::Codex).contains(SAVINGS_TABLE));
-        assert!(cheat_sheet().contains(SAVINGS_TABLE));
-        // The honest caveat must travel with the numbers.
-        assert!(agent_block(Agent::Codex).contains("not a benchmark suite"));
-        assert!(cheat_sheet().contains("not a benchmark suite"));
-    }
-
-    /// The compact block exists to be small. If it stops being much smaller
-    /// than the full one, it has stopped being worth having.
-    #[test]
-    fn the_compact_block_is_a_fraction_of_the_full_one() {
-        for agent in Agent::ALL {
-            let full = agent_block(agent);
-            let small = agent_block_compact(agent);
-            assert!(
-                small.len() * 3 < full.len(),
-                "{} vs {} characters",
-                small.len(),
-                full.len()
-            );
-            // …and still teaches every load bearing thing.
-            for needle in [
-                "ttk run --",
-                "ttk retrieve",
-                "<filter-trash>",
-                "ttk learn --last",
-                "counter-example",
-                "cap://",
-            ] {
-                assert!(
-                    small.contains(needle),
-                    "the compact block dropped `{needle}`"
-                );
-            }
-        }
-        assert_eq!(
-            agent_block_for(Agent::Codex, false),
-            agent_block(Agent::Codex)
-        );
-        assert_eq!(
-            agent_block_for(Agent::Codex, true),
-            agent_block_compact(Agent::Codex)
-        );
-    }
-
-    #[test]
-    fn the_learning_loop_is_taught_everywhere_it_matters() {
-        for text in [
-            agent_block(Agent::ClaudeCode),
-            agent_block(Agent::Codex),
-            cheat_sheet(),
+    fn the_rule_file_teaches_retrieval_filters_and_fallback() {
+        for needle in [
+            "ttk retrieve",
+            "--level 4",
+            "ttk search",
+            "_not_shown",
+            "<secret:",
+            "<filter-trash>",
+            "<filter-keep>",
+            "ttk learn --last",
+            "counter-example",
+            "ttk rules audit",
+            "ttk rules restore",
+            "--when success",
+            "subagent",
         ] {
-            assert!(
-                text.contains("<filter-trash>"),
-                "the tag itself must appear"
-            );
-            assert!(text.contains("ttk learn"));
-            assert!(text.contains("ttk rules"));
+            assert!(TTK_MD.contains(needle), "ttk.md is missing `{needle}`");
         }
-        // The single most important instruction: unmarked text is evidence.
-        assert!(LEARNING_BLOCK.contains("counter-example"));
-        assert!(LEARNING_BLOCK.contains("<filter-keep>"));
-        assert!(agent_block(Agent::ClaudeCode).contains(LEARNING_BLOCK));
     }
 
+    #[test]
+    fn the_core_rules_are_a_small_part_of_the_rule_file() {
+        let core = core_rules();
+        assert!(core.contains("cap://"));
+        assert!(core.contains("ttk retrieve"));
+        assert!(!core.contains("ttk:core"), "markers are stripped");
+        assert!(core.len() * 3 < TTK_MD.len());
+        assert!(agent_context().contains("ttk guide"));
+    }
+
+    #[test]
+    fn codex_gets_the_rules_inline_because_it_has_no_imports() {
+        let full = agent_block(Agent::Codex);
+        assert!(full.contains(TTK_MD.trim()));
+        let compact = agent_block_compact(Agent::Codex);
+        assert!(compact.contains(core_rules()));
+        assert!(compact.len() * 2 < full.len());
+        assert_eq!(agent_block_for(Agent::Codex, true), compact);
+        assert_eq!(agent_block_for(Agent::Codex, false), full);
+    }
+
+    #[test]
+    fn the_cheat_sheet_still_teaches_the_learning_loop() {
+        let text = cheat_sheet();
+        assert!(text.contains("<filter-trash>"));
+        assert!(text.contains("ttk learn"));
+        assert!(text.contains("ttk rules"));
+        assert!(text.contains(SAVINGS_TABLE));
+        assert!(text.contains("not a benchmark suite"));
+    }
     #[test]
     fn the_cheat_sheet_lists_every_command_group() {
         let text = cheat_sheet();

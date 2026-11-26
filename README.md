@@ -254,46 +254,47 @@ these numbers.
 
 ---
 
-## 📈 Your numbers: `ttk gain`
+## 📈 Your numbers: `ttk gain` and `ttk dashboard`
 
-Every `ttk run`, in every repository, is counted in **one** ledger, so a single
+Every output ttk handles — through the hook, `ttk run`, `ttk compile` or
+`ttk read`, in every repository — is counted in **one** ledger, so a single
 command answers "how much has this saved me?" from anywhere:
 
 ```console
 $ ttk gain
-╭────────────────────────────────────────────────────────────────╮
-│  ◆ ttk  token savings · all projects                   v0.1.0  │
-╰────────────────────────────────────────────────────────────────╯
-
-  TOKENS SAVED
+  NET TOKENS SAVED  (saved − ttk's own overhead)
   ~1 284 933
   █████████████████████████░░░░░░░░░░░  71.4%  of ~1 799 204 tokens never reached a model
+  gross ~1 291 410 · overhead ~6 477 · 1 204 of 1 616 commands passed through untouched (too small)
 
-  period            saved  runs  rate
-  today           ~41 877    23   78%
-  last 7 days    ~212 530   118   72%
-  last 30 days   ~803 114   301   71%
-  all time     ~1 284 933   412   71%
+▌ measured model usage
+  consumed      42 322 068 869  tokens over 117 827 responses in 326 sessions (provider-reported)
+  split         input 1 990 989 · cache read 41 625 444 611 · cache write 588 026 392 · output 106 606 877
 
-▌ last 14 days  ▂▅▃█▁▁▄▆▃▇▂▁▅▆
-  today      ███████████████░░░░░░░░░░░░░      ~41 877  23 runs
-  Thu 09-24  ████████████████████░░░░░░░░      ~55 012  31 runs
+  period            saved  overhead        net  runs  rate
+  today           ~41 877      ~210    ~41 667    23   78%
+  last 7 days    ~212 530    ~1 044   ~211 486   118   72%
   …
-
-▌ top commands
-  command     saved                    rate  runs
-  cargo    ~702 118  ████████████████   73%   188
-  pytest   ~381 044  █████████░░░░░░░   69%    96
 ```
 
 <sub>Example output. It shows the format, not your numbers.</sub>
 
+How the numbers are made — and why they can be trusted:
+
+| | |
+|---|---|
+| **Net, not gross** | Everything ttk adds to the context itself — injected rules, hints, summary lines, lessons, retrieved capsules — is booked as *overhead* and subtracted. |
+| **Counted once** | Every record has an id (the hook's `tool_use_id`, the event id). A retried hook, a nested `ttk`, `cmd \| ttk compile` under the hook: one output, one record. |
+| **Parallel-safe** | The ledger is written under an OS file lock; compaction can no longer lose an append from another session. Tested with 16 hooks at once and 8 writers plus a compactor. |
+| **Attributed** | Session, agent, subagent and type come from the hook (or `CLAUDE_CODE_SESSION_ID`); the model is joined from measured usage. |
+| **Estimated vs. measured** | Savings are counterfactual — those tokens never reached a model — so no provider can measure them; they are estimates and carry a `~`. What the models *did* consume is imported from Claude Code's transcripts (`message.usage`, each response once) and shown separately, never added. |
+
 | Command | Shows |
 |---|---|
-| `ttk gain` | every project: total, today, 7 and 30 days, daily chart, top commands and projects |
+| `ttk gain` | net and gross savings, overhead, measured usage, daily chart, top commands and projects |
 | `ttk gain --project` | only the project you are in |
-| `ttk gain --days 30` | a longer daily chart |
-| `ttk gain --session latest` | one session in detail |
+| `ttk dashboard` | everything in a local HTML page: sessions, projects, commands, models & agents, filters, settings |
+| `ttk usage sync` | import measured usage from `~/.claude/projects` (the hooks do this incrementally) |
 | `ttk gain --json` | the same for scripts |
 | `ttk stats` | lifetime detail for this workspace (transformers, capsules, fallbacks) |
 
@@ -322,26 +323,34 @@ folder, `TTK_USAGE=0` switches the ledger off, and `ttk usage forget --all` empt
 
 ## 🤖 Setting up your agent
 
-```console
-$ ttk install
-
-Which coding agent should learn to use ttk?
-  1) Claude Code  (CLAUDE.md)
-  2) Codex        (AGENTS.md)
-  3) All of them
-```
-
-This adds one marked block to `CLAUDE.md` or `AGENTS.md`. The block tells the
-agent to run commands through `ttk run --`, how to read the compact output, how to
-pull the full output back instead of re-running a command, and how to teach the
-filter. Your own instructions stay untouched, and the block is updated in place
-next time.
-
 ```bash
-ttk install --target all --scope project --yes   # non-interactive
-ttk install --target claude --scope global --yes # every project, via ~/.claude/CLAUDE.md
-ttk install --compact                            # ~200-token block instead of ~800
+ttk install --target claude --scope global --yes   # every project
+ttk install --target all --scope project --yes     # this repository only
 ```
+
+An install does three things:
+
+1. **`ttk.md`** — the one rule file every agent and subagent follows: how to
+   read compiled output, how to fetch the original instead of re-running, when
+   and how to teach filters, what may never be filtered.
+2. **A mandatory block in `CLAUDE.md` / `AGENTS.md`.** For Claude Code it is
+   two sentences plus `@ttk.md`, so the rules load with the instruction file in
+   every session (≈80 tokens instead of the old ≈1 800). Codex has no imports
+   and gets the rules inline.
+3. **Hooks in Claude Code's `settings.json`** — the part that does not depend
+   on the agent remembering anything. Your other hooks are kept untouched.
+
+| Hook | What ttk does |
+|---|---|
+| `PostToolUse` (Bash, PowerShell) | compiles the output *before the model sees it* and returns the compiled view; outputs under ~200 tokens pass through untouched; suggests teaching a filter when a large output was barely reduced |
+| `SessionStart` (startup, resume, clear, **compact**) | injects the core rules, so they survive context compaction |
+| `SubagentStart` | injects the core rules into every subagent |
+| `Stop`, `SubagentStop`, `SessionEnd` | imports the provider's measured usage |
+
+A hook never breaks the agent: any failure means "no opinion" and the original
+output, with the error in `<global>/hook.log`. `ttk install --remove-hooks`
+takes them out again; `--no-hooks` installs only the files. Tune it under
+`[hooks]` in `.ttk/config.toml` (`min_tokens`, `min_saving`, `hints`, …).
 
 ---
 
@@ -350,11 +359,16 @@ ttk install --compact                            # ~200-token block instead of ~
 - 🧩 Understands **pytest, cargo test, jest, vitest, go test, rustc, git, logs, JSON and grep**
 - 📦 Every output goes into a **capsule**, retrievable from a one-line summary down to the byte-exact original
 - 🛡️ A **quality firewall** checks every shortening before it is used, and falls back to the original if anything important would be lost
+- 🪝 **Claude Code hooks**: output is compiled automatically, rules survive compaction and reach every subagent
 - 🧠 **Self-improving filters** with line and block rules, fold summaries, whitelists and automatic suggestions
+- ✅ **Validated filters**: every new rule is replayed against earlier outputs and withdrawn if it would touch an error line
+- 🕰️ **Versioned filters**: `ttk rules history` / `ttk rules restore` — every change can be undone
+- 🔍 **Filter audit**: duplicate, subsumed, stale, never-used and net-negative rules (`ttk rules audit --fix`)
+- 🎯 **Context-dependent filters**: `ttk learn --when success` only filters when the command succeeded
 - 🌍 **Global filters** that follow you into every project
 - 🔁 **Repeat and delta suppression** for commands *and* file reads
 - 📂 `ttk read --outline`: a file's declarations instead of the whole file
-- 📈 `ttk gain`: one running total across every project, with a daily chart
+- 📈 `ttk gain` and `ttk dashboard`: net savings after ttk's own overhead, per session, agent, subagent, project and model, next to the provider's measured usage
 - 🔐 Secret detection. Credentials are replaced before a model sees them
 - 🎚️ **Modes** from `observe` (measure only) through `safe` (default) to `maximum`
 - 🎨 Coloured, aligned terminal output that switches to plain text in a pipe (`NO_COLOR`, `TTK_ASCII=1`)
@@ -537,12 +551,17 @@ weil die Firewall jedes gefilterte Ergebnis prüft. Hat eine Regel zu viel
 entfernt, markierst du die Zeile mit `<filter-keep>` und lehrst erneut. Dann wird
 die schuldige Regel stillgelegt.
 
-## 📈 Deine Bilanz: `ttk gain`
+## 📈 Deine Bilanz: `ttk gain` und `ttk dashboard`
 
-Jeder `ttk run` in jedem Repository wird in **einem** Ledger gezählt. `ttk gain`
-zeigt die Summe, heute, 7 und 30 Tage, ein Tagesdiagramm sowie die Top-Befehle und
--Projekte. `--project` beschränkt die Anzeige auf das aktuelle Projekt, `--days 30`
-verlängert das Diagramm, `--json` liefert alles für Skripte.
+Jede Ausgabe, die ttk verarbeitet (Hook, `ttk run`, `ttk compile`, `ttk read`),
+wird in **einem** Ledger gezählt – parallel-sicher (Dateisperre), jede Ausgabe
+genau einmal (IDs), mit Session, Agent, Subagent und Modell. `ttk gain` zeigt die
+**Netto**-Einsparung: alles, was ttk selbst in den Kontext bringt (Regeln,
+Hinweise, Zusammenfassungen, Lektionen, abgerufene Kapseln), wird als Overhead
+abgezogen. Daneben – nie addiert – steht der vom Provider **gemessene**
+Verbrauch aus den Claude-Code-Transkripten (`ttk usage sync`). Einsparungen sind
+kontrafaktisch und daher immer Schätzungen (`~`). `ttk dashboard` zeigt alles als
+lokale HTML-Seite: Sessions, Projekte, Befehle, Modelle & Agents, Filter, Einstellungen.
 
 ## 🌍 Der globale Ordner
 
@@ -561,13 +580,26 @@ Alles, was nicht zu einem einzelnen Projekt gehört, liegt unter `%APPDATA%\ttk`
 
 ## 🤖 Agent einrichten
 
-`ttk install` trägt einen markierten Block in `CLAUDE.md` bzw. `AGENTS.md` ein.
-Deine eigenen Anweisungen bleiben unangetastet.
+`ttk install` schreibt drei Dinge:
+
+1. **`ttk.md`** – die zentrale Regeldatei für jeden Agent und Subagent.
+2. **Einen Pflicht-Block** in `CLAUDE.md` (zwei Sätze plus `@ttk.md`-Import,
+   ≈80 Token) bzw. `AGENTS.md` (Regeln inline, Codex kennt keine Imports).
+3. **Hooks** in Claude Codes `settings.json` – die technische Durchsetzung:
+   `PostToolUse` kompiliert Bash/PowerShell-Ausgaben, bevor das Modell sie sieht;
+   `SessionStart` (auch nach Kontextkomprimierung) und `SubagentStart` injizieren
+   die Kernregeln; `Stop`/`SubagentStop`/`SessionEnd` importieren den gemessenen
+   Verbrauch. Andere Hooks bleiben unangetastet.
 
 ```bash
-ttk install --target claude --scope global --yes # alle Projekte, über ~/.claude/CLAUDE.md
-ttk install --compact                            # ~200-Token-Block statt ~800
+ttk install --target claude --scope global --yes # alle Projekte
+ttk install --remove-hooks                       # Hooks wieder entfernen
 ```
+
+Filter: `ttk rules audit [--fix]` (doppelte, überdeckte, veraltete, negative
+Regeln), `ttk rules history` / `ttk rules restore <version>`,
+`ttk learn --last --when success`. Neue Regeln werden gegen frühere Ausgaben
+validiert und zurückgezogen, wenn sie Fehlerzeilen treffen würden.
 
 ## 🤝 Beitragen & Lizenz
 

@@ -564,6 +564,16 @@ pub fn render_global(usage: &ttk_store::GlobalUsage) -> String {
     ));
 
     if usage.is_empty() {
+        if usage.skipped_lines > 0 {
+            out.push_str(&format!(
+                "{}\n\n",
+                ui::warn(format!(
+                    "the ledger holds {} record(s), but none of them could be read — \
+                     was it written by a newer ttk?",
+                    usage.skipped_lines
+                ))
+            ));
+        }
         out.push_str(&format!(
             "{}\n\n",
             ui::paint(
@@ -750,6 +760,8 @@ pub struct GainView<'a> {
     pub home: Option<std::path::PathBuf>,
     pub filter_files: usize,
     pub filter_rules: usize,
+    /// Provider-reported usage, when transcripts were imported.
+    pub measured: Option<&'a ttk_store::MeasuredUsage>,
 }
 
 impl GainView<'_> {
@@ -757,9 +769,7 @@ impl GainView<'_> {
     fn window(&self, n: i64) -> ttk_store::usage::ProgramTotals {
         let mut t = ttk_store::usage::ProgramTotals::default();
         for (_, d) in self.daily.range(self.today - n + 1..=self.today) {
-            t.runs += d.runs;
-            t.tokens_before += d.tokens_before;
-            t.tokens_after += d.tokens_after;
+            t.add(d);
         }
         t
     }
@@ -787,6 +797,16 @@ pub fn render_gain(v: &GainView) -> String {
     out.push_str("\n\n");
 
     if usage.is_empty() {
+        if usage.skipped_lines > 0 {
+            out.push_str(&format!(
+                "{}\n\n",
+                ui::warn(format!(
+                    "the ledger holds {} record(s), but none of them could be read — \
+                     was it written by a newer ttk?",
+                    usage.skipped_lines
+                ))
+            ));
+        }
         out.push_str(&format!(
             "  {}\n  {}\n\n",
             ui::paint(ui::HEAD, "Nothing saved yet."),
@@ -805,8 +825,19 @@ pub fn render_gain(v: &GainView) -> String {
     }
 
     // -- the headline ------------------------------------------------------
-    out.push_str(&format!("  {}\n", ui::paint(ui::DIM, "TOKENS SAVED")));
-    out.push_str(&format!("  {}\n", ui::paint(ui::HERO, m(usage.saved()))));
+    // Net first: a saving that costs more in rules and hints than it removes
+    // is not a saving, and the headline is the one number people quote.
+    let net = usage.net();
+    out.push_str(&format!(
+        "  {}\n",
+        ui::paint(ui::DIM, "NET TOKENS SAVED  (saved − ttk's own overhead)")
+    ));
+    let net_text = if net < 0 {
+        ui::paint(ui::BAD, format!("−{}", m(net.unsigned_abs())))
+    } else {
+        ui::paint(ui::HERO, m(net as u64))
+    };
+    out.push_str(&format!("  {net_text}\n"));
     out.push_str(&format!(
         "  {}  {}  {}\n",
         ui::bar(usage.saved_percent() / 100.0, 36),
@@ -816,12 +847,81 @@ pub fn render_gain(v: &GainView) -> String {
             format!("of {} tokens never reached a model", m(usage.tokens_before))
         )
     ));
+    let mut ledger_facts = vec![
+        format!("gross {}", ui::paint(ui::SAVED, m(usage.saved()))),
+        format!("overhead {}", m(usage.overhead)),
+    ];
+    if usage.passthrough > 0 {
+        ledger_facts.push(format!(
+            "{} of {} commands passed through untouched (too small)",
+            ui::thousands(usage.passthrough),
+            ui::thousands(usage.events)
+        ));
+    }
+    out.push_str(&format!(
+        "  {}\n",
+        ledger_facts.join(&ui::paint(ui::DIM, format!(" {} ", ui::glyphs().bullet)))
+    ));
+
+    if let Some(measured) = v.measured.filter(|m| m.totals.messages > 0) {
+        let t = &measured.totals;
+        out.push_str(&format!("{}\n", ui::heading("measured model usage")));
+        out.push_str(&format!(
+            "{}\n",
+            ui::kv_note(
+                "consumed",
+                ui::paint(ui::NUM, ui::thousands(t.total())),
+                format!(
+                    "tokens over {} responses in {} sessions (provider-reported)",
+                    ui::thousands(t.messages),
+                    ui::thousands(measured.sessions)
+                )
+            )
+        ));
+        out.push_str(&format!(
+            "{}\n",
+            ui::kv_note(
+                "split",
+                format!(
+                    "input {} · cache read {} · cache write {} · output {}",
+                    ui::thousands(t.input),
+                    ui::thousands(t.cache_read),
+                    ui::thousands(t.cache_creation),
+                    ui::thousands(t.output)
+                ),
+                ""
+            )
+        ));
+        if t.total() > 0 && net > 0 {
+            // Against fresh (uncached) input, not cache reads: a tool output
+            // enters the context once as new input, and that is what a saving
+            // replaces. Cache reads re-bill the same tokens on every turn.
+            let fresh = t.input + t.cache_creation;
+            let share = net as f64 * 100.0 / fresh.max(1) as f64;
+            let shown = if share < 0.1 {
+                "<0.1%".to_string()
+            } else {
+                format!("{share:.1}%")
+            };
+            out.push_str(&format!(
+                "{}\n",
+                ui::detail(format!(
+                    "ttk's net saving equals {shown} of the fresh input the models received \
+                     ({} tokens, cache reads excluded) — measured and estimated numbers are \
+                     shown side by side, never added",
+                    ui::thousands(fresh)
+                ))
+            ));
+        }
+    }
 
     // -- by period ---------------------------------------------------------
     let all_time = ttk_store::usage::ProgramTotals {
         runs: usage.events,
         tokens_before: usage.tokens_before,
         tokens_after: usage.tokens_after,
+        overhead: usage.overhead,
+        passthrough: usage.passthrough,
     };
     let mut rows = Vec::new();
     for (label, t) in [
@@ -830,6 +930,7 @@ pub fn render_gain(v: &GainView) -> String {
         ("last 30 days", v.window(30)),
         ("all time", all_time),
     ] {
+        let net = t.net();
         rows.push(vec![
             label.to_string(),
             if t.saved() == 0 {
@@ -837,14 +938,27 @@ pub fn render_gain(v: &GainView) -> String {
             } else {
                 ui::paint(ui::SAVED, m(t.saved()))
             },
+            ui::paint(ui::DIM, m(t.overhead)),
+            if net < 0 {
+                ui::paint(ui::BAD, format!("−{}", m(net.unsigned_abs())))
+            } else {
+                m(net as u64)
+            },
             ui::thousands(t.runs),
             rate(&t),
         ]);
     }
     out.push('\n');
     out.push_str(&ui::table(
-        &["period", "saved", "runs", "rate"],
-        &[Align::Left, Align::Right, Align::Right, Align::Right],
+        &["period", "saved", "overhead", "net", "runs", "rate"],
+        &[
+            Align::Left,
+            Align::Right,
+            Align::Right,
+            Align::Right,
+            Align::Right,
+            Align::Right,
+        ],
         &rows,
     ));
 
@@ -997,11 +1111,21 @@ pub fn render_gain(v: &GainView) -> String {
             ))
         ));
     }
+    if usage.duplicates > 0 {
+        out.push_str(&format!(
+            "{}\n",
+            ui::detail(format!(
+                "{} record(s) were written twice and counted once",
+                usage.duplicates
+            ))
+        ));
+    }
     out.push('\n');
     out.push_str(&format!(
-        "  {}  {}  {}\n",
+        "  {}  {}  {}  {}\n",
+        ui::paint(ui::CODE, "ttk dashboard"),
         ui::paint(ui::CODE, "ttk gain --project"),
-        ui::paint(ui::CODE, "ttk gain --days 30"),
+        ui::paint(ui::CODE, "ttk usage sync"),
         ui::paint(ui::CODE, "ttk global --open"),
     ));
     if est {
@@ -1009,7 +1133,8 @@ pub fn render_gain(v: &GainView) -> String {
             "  {}\n",
             ui::paint(
                 ui::DIM,
-                "`~` marks heuristic estimates; exact counts need a provider usage field."
+                "`~` = estimated: a saving is counterfactual (those tokens never reached a model), \
+                 so no provider can measure it."
             )
         ));
     }

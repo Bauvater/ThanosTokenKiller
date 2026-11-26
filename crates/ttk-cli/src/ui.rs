@@ -79,6 +79,12 @@ pub fn paint<T: fmt::Display>(style: Style, value: T) -> String {
     format!("{style}{value}{style:#}")
 }
 
+/// The text of a styled string without its escape codes — what an agent
+/// reads when stderr is not a terminal, and so what its tokens are counted on.
+pub fn strip_ansi(s: &str) -> String {
+    anstream::adapter::strip_str(s).to_string()
+}
+
 /// Set the global colour policy from a `--color` value.
 pub fn set_color_choice(choice: &str) -> Result<(), ttk_core::Error> {
     let c = match choice.trim().to_ascii_lowercase().as_str() {

@@ -22,6 +22,7 @@
 pub mod blob;
 pub mod capsule;
 pub mod events;
+pub mod provider;
 pub mod usage;
 
 use std::path::{Path, PathBuf};
@@ -32,7 +33,8 @@ use ttk_core::config::Config;
 pub use blob::{BlobRef, BlobStore, Compression};
 pub use capsule::{Capsule, CapsuleStore, GcStats, LEVEL_RAW, NewCapsule, StoreStats};
 pub use events::EventLog;
-pub use usage::{GlobalUsage, ProjectUsage, RunRecord, UsageLedger};
+pub use provider::{MeasuredUsage, ProviderStore};
+pub use usage::{GlobalUsage, ProjectUsage, RecordKind, RunRecord, SessionUsage, UsageLedger};
 
 /// Directory name used inside a project.
 pub const WORKSPACE_DIR: &str = ".ttk";

@@ -144,7 +144,11 @@ fn the_agent_block_exists_once_and_updates_replace_it() {
     let text = std::fs::read_to_string(&global).expect("read");
     assert_eq!(text.matches(BEGIN).count(), 1, "{text}");
     assert!(!text.contains("old instructions"), "the update replaced it");
-    assert!(text.contains("ttk gain"), "with the current instructions");
+    assert!(text.contains("@ttk.md"), "with the current instructions");
+    assert!(
+        home.join(".claude").join("ttk.md").is_file(),
+        "and the rule file the block imports"
+    );
     assert!(
         text.starts_with("# my rules\r\n"),
         "the user's text and CRLF stay"
@@ -178,6 +182,58 @@ fn the_agent_block_exists_once_and_updates_replace_it() {
     ]);
     assert!(o.status.success(), "{}", stderr(&o));
     assert!(s.dir.path().join("CLAUDE.md").exists());
+}
+
+/// Agents run several commands at once. Every one of them must succeed and
+/// be counted: the capsule index admits one process at a time, so the others
+/// have to wait for it rather than fail, and a long running command must not
+/// hold it while it runs.
+#[test]
+fn parallel_invocations_all_succeed_and_are_all_counted() {
+    let s = Sandbox::new();
+    let input = s.write("in.txt", &"a line of output worth compiling\n".repeat(200));
+    let slow: Vec<String> = if cfg!(windows) {
+        [
+            "run",
+            "--",
+            "cmd",
+            "/C",
+            "ping -n 3 127.0.0.1 > nul & echo slow done",
+        ]
+        .map(String::from)
+        .to_vec()
+    } else {
+        ["run", "--", "sh", "-c", "sleep 2; echo slow done"]
+            .map(String::from)
+            .to_vec()
+    };
+
+    let outputs: Vec<Output> = std::thread::scope(|scope| {
+        let mut handles = vec![scope.spawn(|| {
+            let argv: Vec<&str> = slow.iter().map(String::as_str).collect();
+            s.ttk(&argv)
+        })];
+        for _ in 0..8 {
+            handles.push(scope.spawn(|| s.ttk(&["compile", "--file", &path_arg(&input)])));
+        }
+        handles
+            .into_iter()
+            .map(|h| h.join().expect("thread"))
+            .collect()
+    });
+
+    for o in &outputs {
+        assert!(o.status.success(), "a parallel ttk failed: {}", stderr(o));
+    }
+    assert!(
+        stdout(&outputs[0]).contains("slow done"),
+        "{}",
+        stdout(&outputs[0])
+    );
+
+    let v: serde_json::Value =
+        serde_json::from_str(&stdout(&s.ttk(&["gain", "--json"]))).expect("json");
+    assert_eq!(v["events"], 9, "every invocation is in the ledger: {v}");
 }
 
 #[test]
@@ -265,12 +321,34 @@ fn install_adds_a_managed_block_without_touching_existing_rules() {
 
     let claude = std::fs::read_to_string(s.dir.path().join("CLAUDE.md")).expect("CLAUDE.md");
     assert!(claude.starts_with("# My rules\n\nAlways run the tests.\n"));
-    assert!(claude.contains("ttk run -- cargo test"));
-    assert!(claude.contains("Bash tool"), "Claude Code wording expected");
-    assert!(claude.contains("ttk retrieve"), "retrieval must be taught");
+    assert!(claude.contains("MUST read `ttk.md` completely"));
+    assert!(
+        claude.contains("\n@ttk.md\n"),
+        "the rules are imported: {claude}"
+    );
+    let rules = std::fs::read_to_string(s.dir.path().join("ttk.md")).expect("ttk.md");
+    assert!(rules.contains("ttk retrieve"), "retrieval must be taught");
+    assert!(rules.contains("<filter-trash>"), "and filtering");
 
     let agents = std::fs::read_to_string(s.dir.path().join("AGENTS.md")).expect("AGENTS.md");
-    assert!(agents.contains("shell command"), "Codex wording expected");
+    assert!(agents.contains("shell commands"), "Codex wording expected");
+    assert!(
+        agents.contains("ttk retrieve"),
+        "Codex has no imports: rules inline"
+    );
+
+    // The technical half: hooks registered in the project's Claude settings.
+    let settings: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(s.dir.path().join(".claude").join("settings.json"))
+            .expect("settings.json"),
+    )
+    .expect("json");
+    for event in ["PostToolUse", "SessionStart", "SubagentStart", "Stop"] {
+        let cmd = settings["hooks"][event][0]["hooks"][0]["command"]
+            .as_str()
+            .unwrap_or_default();
+        assert!(cmd.ends_with(" hook"), "{event}: {settings}");
+    }
 
     // Running it again must be a no-op.
     let again = s.ttk(&["install", "--target", "all", "--yes"]);
@@ -1682,32 +1760,320 @@ fn setup_walks_through_everything_and_is_idempotent() {
 
 #[test]
 fn the_compact_agent_block_is_a_fraction_of_the_full_one() {
+    // Codex has no imports, so its full block carries all of ttk.md inline;
+    // the compact one only the core rules and a pointer to the file.
     let full = Sandbox::new();
     full.ttk(&[
-        "install", "--target", "claude", "--scope", "project", "--yes",
+        "install", "--target", "codex", "--scope", "project", "--yes",
     ]);
-    let long = std::fs::read_to_string(full.dir.path().join("CLAUDE.md")).expect("CLAUDE.md");
+    let long = std::fs::read_to_string(full.dir.path().join("AGENTS.md")).expect("AGENTS.md");
 
     let small = Sandbox::new();
     small.ttk(&[
         "install",
         "--target",
-        "claude",
+        "codex",
         "--scope",
         "project",
         "--yes",
         "--compact",
     ]);
-    let short = std::fs::read_to_string(small.dir.path().join("CLAUDE.md")).expect("CLAUDE.md");
+    let short = std::fs::read_to_string(small.dir.path().join("AGENTS.md")).expect("AGENTS.md");
 
     assert!(
-        short.len() * 3 < long.len(),
+        short.len() * 2 < long.len(),
         "{} vs {}",
         short.len(),
         long.len()
     );
-    // …and still teaches the loop.
+    // …and still carries the load-bearing rules and the way to the rest.
     assert!(short.contains("ttk run --"));
-    assert!(short.contains("<filter-trash>"));
     assert!(short.contains("ttk retrieve"));
+    assert!(short.contains("ttk.md"));
+    assert!(small.dir.path().join("ttk.md").is_file());
+}
+
+// ---------------------------------------------------------------------------
+// `ttk hook`: the Claude Code integration, end to end
+// ---------------------------------------------------------------------------
+
+impl Sandbox {
+    /// Run `ttk <args>` with `input` on stdin.
+    fn ttk_stdin(&self, args: &[&str], input: &str) -> Output {
+        use std::io::Write;
+        let mut child = Command::new(env!("CARGO_BIN_EXE_ttk"))
+            .args(args)
+            .current_dir(self.dir.path())
+            .env("TTK_HOME", self.home())
+            .env("TTK_NO_PATH_SETUP", "1")
+            .env("TTK_USER_RULES", self.dir.path().join("user-rules.json"))
+            .env("TTK_GLOBAL_HOME", self.dir.path().join("global"))
+            .env("TTK_AGENT_HOME", self.dir.path().join("agent-home"))
+            .env("NO_COLOR", "1")
+            .env_remove("TTK_MODE")
+            .env_remove("TTK_NESTED")
+            .env_remove("CLAUDE_CODE_SESSION_ID")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("ttk spawns");
+        child
+            .stdin
+            .take()
+            .expect("stdin")
+            .write_all(input.as_bytes())
+            .expect("write stdin");
+        child.wait_with_output().expect("ttk runs")
+    }
+
+    fn gain_json(&self) -> serde_json::Value {
+        serde_json::from_str(&stdout(&self.ttk(&["gain", "--json"]))).expect("gain json")
+    }
+}
+
+fn post_tool_use(s: &Sandbox, tool_use_id: &str, command: &str, out: &str) -> serde_json::Value {
+    serde_json::json!({
+        "hook_event_name": "PostToolUse",
+        "session_id": "sess-1",
+        "cwd": s.dir.path().display().to_string(),
+        "tool_name": "Bash",
+        "tool_use_id": tool_use_id,
+        "tool_input": {"command": command},
+        "tool_response": {"stdout": out, "stderr": "", "interrupted": false, "isImage": false},
+    })
+}
+
+#[test]
+fn the_post_tool_use_hook_replaces_large_output_and_counts_it_once() {
+    let s = Sandbox::new();
+    let event = post_tool_use(&s, "toolu_A", "cd x && pytest -q 2>&1", PYTEST);
+    let o = s.ttk_stdin(&["hook"], &event.to_string());
+    assert!(o.status.success(), "{}", stderr(&o));
+    let reply: serde_json::Value = serde_json::from_str(&stdout(&o)).expect("hook json");
+    let replaced = &reply["hookSpecificOutput"]["updatedToolOutput"];
+    assert_eq!(reply["hookSpecificOutput"]["hookEventName"], "PostToolUse");
+    let text = replaced["stdout"].as_str().expect("stdout");
+    assert!(text.len() < PYTEST.len(), "{text}");
+    assert!(
+        text.contains("tests/auth/test_expiry.py"),
+        "the failure survives: {text}"
+    );
+    assert!(
+        text.contains("cap://"),
+        "and the original is one retrieve away"
+    );
+    assert_eq!(replaced["interrupted"], false, "the other fields are kept");
+
+    // A retried hook (same tool_use_id) must not count twice.
+    s.ttk_stdin(&["hook"], &event.to_string());
+    let v = s.gain_json();
+    assert_eq!(v["events"], 1, "{v}");
+    assert!(v["saved"].as_u64().unwrap_or(0) > 0, "{v}");
+    assert_eq!(v["duplicates"], 1, "{v}");
+    assert_eq!(v["sessions"], 1, "attributed to the agent session: {v}");
+}
+
+#[test]
+fn small_outputs_pass_through_untouched_but_are_counted() {
+    let s = Sandbox::new();
+    let event = post_tool_use(
+        &s,
+        "toolu_B",
+        "git status",
+        "On branch main\nnothing to commit\n",
+    );
+    let o = s.ttk_stdin(&["hook"], &event.to_string());
+    assert!(o.status.success());
+    assert!(stdout(&o).trim().is_empty(), "no opinion: {}", stdout(&o));
+    let v = s.gain_json();
+    assert_eq!(v["events"], 1, "{v}");
+    assert_eq!(v["passthrough"], 1, "{v}");
+    assert_eq!(v["saved"], 0, "{v}");
+}
+
+#[test]
+fn ttk_commands_are_not_counted_a_second_time_by_the_hook() {
+    let s = Sandbox::new();
+    for cmd in ["ttk run -- pytest -q", "pytest -q | ttk compile"] {
+        let event = post_tool_use(&s, cmd, cmd, PYTEST);
+        let o = s.ttk_stdin(&["hook"], &event.to_string());
+        assert!(stdout(&o).trim().is_empty(), "{cmd}");
+    }
+    assert_eq!(s.gain_json()["events"], 0);
+}
+
+#[test]
+fn a_broken_hook_input_never_breaks_the_agent() {
+    let s = Sandbox::new();
+    let o = s.ttk_stdin(&["hook"], "this is not json");
+    assert!(o.status.success(), "a hook must always exit 0");
+    assert!(stdout(&o).trim().is_empty());
+}
+
+#[test]
+fn session_start_and_subagent_start_inject_the_core_rules_as_overhead() {
+    let s = Sandbox::new();
+    let cwd = s.dir.path().display().to_string();
+    for (event, extra) in [
+        ("SessionStart", serde_json::json!({"source": "compact"})),
+        (
+            "SubagentStart",
+            serde_json::json!({"agent_id": "a1", "agent_type": "Explore"}),
+        ),
+    ] {
+        let mut input = serde_json::json!({
+            "hook_event_name": event, "session_id": "sess-1", "cwd": cwd,
+        });
+        for (k, v) in extra.as_object().expect("obj") {
+            input[k] = v.clone();
+        }
+        let o = s.ttk_stdin(&["hook"], &input.to_string());
+        let reply: serde_json::Value = serde_json::from_str(&stdout(&o)).expect("json");
+        let ctx = reply["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .expect("context");
+        assert_eq!(reply["hookSpecificOutput"]["hookEventName"], event);
+        assert!(
+            ctx.contains("cap://") && ctx.contains("ttk retrieve"),
+            "{ctx}"
+        );
+        assert!(ctx.len() < 2000, "the injected context stays small");
+    }
+    let v = s.gain_json();
+    assert_eq!(v["events"], 0, "overhead is not a command: {v}");
+    assert!(v["overhead"].as_u64().unwrap_or(0) > 100, "{v}");
+    assert!(v["net"].as_i64().unwrap_or(0) < 0, "and is subtracted: {v}");
+    assert!(v["overhead_by_cause"]["context"].as_u64().is_some(), "{v}");
+}
+
+#[test]
+fn stop_imports_measured_usage_from_the_transcript() {
+    let s = Sandbox::new();
+    let line = |id: &str, out: u64| {
+        serde_json::json!({
+            "type": "assistant", "sessionId": "sess-1", "timestamp": "2026-11-25T10:00:00.000Z",
+            "message": {"id": id, "model": "claude-opus-5-5",
+                "usage": {"input_tokens": 10, "output_tokens": out,
+                          "cache_read_input_tokens": 1000, "cache_creation_input_tokens": 100}}
+        })
+        .to_string()
+    };
+    // One response streamed as two lines, plus a second response.
+    let transcript = s.write(
+        "t.jsonl",
+        &format!(
+            "{}\n{}\n{}\n",
+            line("m1", 50),
+            line("m1", 50),
+            line("m2", 5)
+        ),
+    );
+    let input = serde_json::json!({
+        "hook_event_name": "Stop", "session_id": "sess-1",
+        "cwd": s.dir.path().display().to_string(),
+        "transcript_path": transcript.display().to_string(),
+    });
+    for _ in 0..2 {
+        let o = s.ttk_stdin(&["hook"], &input.to_string());
+        assert!(o.status.success());
+    }
+    let v = s.gain_json();
+    assert_eq!(v["measured"]["messages"], 2, "{v}");
+    assert_eq!(v["measured"]["output"], 55, "{v}");
+    assert_eq!(v["measured"]["total"], 2 * 1110 + 55, "{v}");
+}
+
+#[test]
+fn a_nested_ttk_counts_the_output_once() {
+    let s = Sandbox::new();
+    let exe = env!("CARGO_BIN_EXE_ttk");
+    let input = s.write("in.txt", PYTEST);
+    let o = s.ttk(&["run", "--", exe, "compile", "--file", &path_arg(&input)]);
+    assert!(o.status.success(), "{}", stderr(&o));
+    assert_eq!(s.gain_json()["events"], 1);
+}
+
+/// Many agents, one machine: sixteen hooks at once, all counted, none lost.
+#[test]
+fn parallel_hooks_are_all_counted() {
+    let s = Sandbox::new();
+    let outputs: Vec<Output> = std::thread::scope(|scope| {
+        let handles: Vec<_> = (0..16)
+            .map(|i| {
+                let s = &s;
+                scope.spawn(move || {
+                    let mut e = post_tool_use(s, &format!("toolu_{i}"), "pytest -q", PYTEST);
+                    e["session_id"] = serde_json::json!(format!("sess-{}", i % 4));
+                    s.ttk_stdin(&["hook"], &e.to_string())
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .map(|h| h.join().expect("join"))
+            .collect()
+    });
+    for o in &outputs {
+        assert!(o.status.success(), "{}", stderr(o));
+    }
+    let v = s.gain_json();
+    assert_eq!(v["events"], 16, "{v}");
+    assert_eq!(v["sessions"], 4, "{v}");
+}
+
+#[test]
+fn the_dashboard_is_written_with_real_data() {
+    let s = Sandbox::new();
+    let event = post_tool_use(&s, "toolu_D", "pytest -q", PYTEST);
+    s.ttk_stdin(&["hook"], &event.to_string());
+    let out = s.dir.path().join("dash.html");
+    let o = s.ttk(&["dashboard", "--no-open", "--out", &path_arg(&out)]);
+    assert!(o.status.success(), "{}", stderr(&o));
+    let html = std::fs::read_to_string(&out).expect("html");
+    assert!(
+        !html.contains("/*__TTK_DATA__*/null"),
+        "the data was injected"
+    );
+    assert!(html.contains("\"sess-1\""), "with the session");
+    assert!(html.contains("\"pytest\""), "and the command");
+}
+
+#[test]
+fn rule_changes_are_versioned_and_restorable() {
+    let s = Sandbox::new();
+    let lesson = s.write(
+        "lesson.txt",
+        "<filter-trash>\nnpm WARN deprecated inflight@1.0.6: This module is not supported\n\
+         </filter-trash>\nadded 412 packages in 9s\n",
+    );
+    let learn = |scope: &str| {
+        let o = s.ttk(&["learn", "--file", &path_arg(&lesson), "--scope", scope]);
+        assert!(o.status.success(), "{}", stderr(&o));
+    };
+    learn("npm install");
+    learn("npm ci");
+    let history: serde_json::Value =
+        serde_json::from_str(&stdout(&s.ttk(&["rules", "history", "--json"]))).expect("json");
+    let versions = history.as_array().expect("array");
+    assert_eq!(
+        versions.len(),
+        1,
+        "the second learn replaced one version: {history}"
+    );
+    let id = versions[0]["id"].as_str().expect("id").to_string();
+    assert_eq!(versions[0]["rules"], 1);
+
+    let o = s.ttk(&["rules", "restore", &id]);
+    assert!(o.status.success(), "{}", stderr(&o));
+    let rules: serde_json::Value =
+        serde_json::from_str(&stdout(&s.ttk(&["rules", "list", "--json"]))).expect("json");
+    let n = rules["rules"]
+        .as_array()
+        .map(Vec::len)
+        .or_else(|| rules.as_array().map(Vec::len));
+    assert_eq!(n, Some(1), "back to one rule: {rules}");
+
+    let audit = s.ttk(&["rules", "audit", "--json"]);
+    assert!(audit.status.success(), "{}", stderr(&audit));
 }

@@ -7,9 +7,13 @@
 
 mod ui;
 
+mod attribution;
+mod claude_hooks;
 mod commands;
+mod dashboard;
 mod delta;
 mod guide;
+mod hook;
 mod install;
 mod learncmd;
 mod outline;
@@ -105,6 +109,12 @@ enum Command {
         /// the difference is larger than it looks.
         #[arg(long)]
         compact: bool,
+        /// Do not register `ttk hook` in Claude Code's settings.json.
+        #[arg(long)]
+        no_hooks: bool,
+        /// Remove ttk's hooks from Claude Code's settings.json instead.
+        #[arg(long, conflicts_with = "no_hooks")]
+        remove_hooks: bool,
     },
     /// Walk through everything at once: workspace, agent, PATH, first run.
     ///
@@ -123,6 +133,25 @@ enum Command {
     },
     /// Check the installation, the workspace and the effective configuration.
     Doctor,
+    /// Handle one Claude Code hook event (JSON on stdin). Registered by
+    /// `ttk install`; not meant to be typed.
+    #[command(hide = true)]
+    Hook,
+    /// Print `ttk.md`: the rules every agent and subagent follows.
+    Guide {
+        /// Only the core rules the hook injects.
+        #[arg(long)]
+        core: bool,
+    },
+    /// Open the statistics dashboard (a self-contained local HTML page).
+    Dashboard {
+        /// Write it here instead of the global folder.
+        #[arg(long, value_name = "PATH")]
+        out: Option<String>,
+        /// Do not open it in the browser.
+        #[arg(long)]
+        no_open: bool,
+    },
     /// Show the effective configuration and where each layer came from.
     Config {
         /// Print the config file paths only.
@@ -177,6 +206,10 @@ enum Command {
         /// A note stored with the new rules.
         #[arg(long, value_name = "TEXT")]
         note: Option<String>,
+        /// Only apply the rules when the command `success`fully ran, or on
+        /// `failure` — noise you want to see when something breaks.
+        #[arg(long, value_name = "WHEN")]
+        when: Option<String>,
     },
     /// Inspect and maintain the learned filter rules.
     Rules {
@@ -347,6 +380,12 @@ enum InstallerAction {
 enum UsageCmd {
     /// Print the path of the ledger.
     Path,
+    /// Import measured model usage from Claude Code transcripts.
+    Sync {
+        /// A transcripts folder other than `~/.claude/projects`.
+        #[arg(long, value_name = "DIR")]
+        dir: Option<String>,
+    },
     /// Fold old records into per-project rollups. Totals are unchanged.
     Compact {
         #[arg(long, default_value_t = 45, value_name = "DAYS")]
@@ -387,6 +426,25 @@ enum RulesAction {
         unused_days: u64,
         #[arg(long)]
         dry_run: bool,
+    },
+    /// Find duplicate, subsumed, stale, never-used and negative rules.
+    Audit {
+        /// Remove the redundant (duplicate and subsumed) rules.
+        #[arg(long)]
+        fix: bool,
+    },
+    /// Earlier versions of the rule files; every change is kept.
+    History {
+        /// 0 = no limit.
+        #[arg(long, default_value_t = 30, value_name = "N")]
+        limit: usize,
+    },
+    /// Bring back an earlier version of a rule file.
+    Restore {
+        version: String,
+        /// Look in the global rule files first.
+        #[arg(long)]
+        user: bool,
     },
     /// Print every rule as JSON, for `ttk rules import` elsewhere.
     Export,
@@ -459,15 +517,24 @@ fn main() {
             dry_run,
             no_path,
             compact,
-        } => commands::install(
-            &ctx,
-            target.as_deref(),
-            scope.as_deref(),
-            yes,
-            dry_run,
-            !no_path,
-            compact,
-        ),
+            no_hooks,
+            remove_hooks,
+        } => {
+            if remove_hooks {
+                commands::remove_hooks(&ctx, scope.as_deref(), dry_run)
+            } else {
+                commands::install(
+                    &ctx,
+                    target.as_deref(),
+                    scope.as_deref(),
+                    yes,
+                    dry_run,
+                    !no_path,
+                    compact,
+                    !no_hooks,
+                )
+            }
+        }
         Command::Setup {
             yes,
             no_path,
@@ -481,6 +548,11 @@ fn main() {
             },
         ),
         Command::Doctor => commands::doctor(&ctx),
+        Command::Hook => Ok(hook::run()),
+        Command::Guide { core } => commands::guide(core),
+        Command::Dashboard { out, no_open } => {
+            crate::dashboard::run(&ctx, out.as_deref(), !no_open)
+        }
         Command::Config { paths } => commands::config(&ctx, paths),
         Command::Run { stream, argv } => commands::run(&ctx, &argv, stream),
         Command::Learn {
@@ -495,6 +567,7 @@ fn main() {
             dry_run,
             force,
             note,
+            when,
         } => learncmd::learn(
             &ctx,
             &learncmd::LearnArgs {
@@ -509,6 +582,7 @@ fn main() {
                 dry_run,
                 force,
                 note: note.as_deref(),
+                when: when.as_deref(),
             },
         ),
         Command::Rules { action } => match action.unwrap_or(RulesAction::List {
@@ -525,6 +599,9 @@ fn main() {
                 dry_run,
             } => learncmd::rules_prune(&ctx, unused_days, dry_run),
             RulesAction::Export => learncmd::rules_export(&ctx),
+            RulesAction::Audit { fix } => learncmd::rules_audit(&ctx, fix),
+            RulesAction::History { limit } => learncmd::rules_history(&ctx, limit),
+            RulesAction::Restore { version, user } => learncmd::rules_restore(&ctx, &version, user),
             RulesAction::Import { file, user } => {
                 learncmd::rules_import(&ctx, file.as_deref(), user)
             }
@@ -553,6 +630,7 @@ fn main() {
             &ctx,
             match action {
                 UsageCmd::Path => commands::UsageAction::Path,
+                UsageCmd::Sync { dir } => commands::UsageAction::Sync { dir },
                 UsageCmd::Compact { retain_days } => commands::UsageAction::Compact { retain_days },
                 UsageCmd::Forget { project, all } => commands::UsageAction::Forget { project, all },
             },

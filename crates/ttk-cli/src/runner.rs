@@ -49,6 +49,27 @@ impl Captured {
 /// When `echo` is true the raw streams are also forwarded to the terminal, so
 /// a human can watch a long build while ThanosTokenKiller still compiles the
 /// result.
+/// Set in the environment of every command `ttk run` starts.
+pub const NESTED_ENV: &str = "TTK_NESTED";
+
+/// Is this process running inside a command an outer `ttk run` captures?
+pub fn is_nested() -> bool {
+    std::env::var(NESTED_ENV).is_ok_and(|v| v == "1")
+}
+
+/// Run a command with inherited stdio, returning its exit code. Used when
+/// nested: the outer `ttk` captures and counts the output.
+pub fn run_transparent(argv: &[String]) -> Result<i32> {
+    let (program, args) = argv
+        .split_first()
+        .ok_or_else(|| Error::other("no command given"))?;
+    let status = Command::new(program)
+        .args(args)
+        .status()
+        .map_err(|e| Error::other(format!("cannot run `{program}`: {e}")))?;
+    Ok(status.code().unwrap_or(1))
+}
+
 pub fn run(argv: &[String], max_bytes: u64, echo: bool) -> Result<Captured> {
     let (program, args) = argv
         .split_first()
@@ -61,6 +82,10 @@ pub fn run(argv: &[String], max_bytes: u64, echo: bool) -> Result<Captured> {
     let started = Instant::now();
     let mut child = Command::new(program)
         .args(args)
+        // A `ttk` started by this command (`ttk run -- sh -c "… | ttk compile"`)
+        // must not count the same output a second time: it sees this marker
+        // and passes the content through untouched and unrecorded.
+        .env(NESTED_ENV, "1")
         .stdin(Stdio::inherit())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

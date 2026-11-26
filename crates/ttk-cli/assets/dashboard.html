@@ -1,0 +1,434 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>ttk dashboard</title>
+<script>
+(function(){var t=null;try{t=localStorage.getItem('ttk-theme')}catch(e){}
+if(t!=='light'&&t!=='dark'){t=window.matchMedia&&matchMedia('(prefers-color-scheme: light)').matches?'light':'dark'}
+document.documentElement.setAttribute('data-theme',t)})();
+</script>
+<style>
+:root{--sp1:4px;--sp2:8px;--sp3:12px;--sp4:16px;--sp5:24px;--sp6:32px;--r:8px;
+--font:system-ui,-apple-system,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;
+--mono:ui-monospace,"Cascadia Mono","Cascadia Code",Consolas,"SF Mono",Menlo,monospace;
+color-scheme:dark;--bg:#111214;--s1:#18191c;--s2:#212226;--line:#2e3035;--tx:#ecebe8;--tx2:#b8b7b0;--tx3:#8f8e88;
+--acc:#3987e5;--accs:rgba(57,135,229,.16);--aft:#5d6068;--ovh:#d95926;
+--good:#3cbf7a;--warn:#d9a21b;--ser:#e5813a;--crit:#ef7474;--neu:#9a9993}
+:root[data-theme=light]{color-scheme:light;--bg:#f3f3f1;--s1:#fcfcfb;--s2:#efeeeb;--line:#dcdbd6;--tx:#0b0b0b;--tx2:#4c4b48;--tx3:#63625e;
+--acc:#2a78d6;--accs:rgba(42,120,214,.11);--aft:#b4b3ad;--ovh:#eb6834;
+--good:#17834f;--warn:#8a5f00;--ser:#b4501b;--crit:#c43a39;--neu:#63625e}
+*{box-sizing:border-box}
+html,body{margin:0}
+body{background:var(--bg);color:var(--tx);font:14px/1.5 var(--font);-webkit-font-smoothing:antialiased}
+button,input{font:inherit;color:inherit}
+.num,td.r,.kpi .v{font-variant-numeric:tabular-nums}
+code,.mono{font-family:var(--mono);font-size:12.5px}
+a{color:var(--acc)}
+header.top{display:flex;align-items:center;gap:var(--sp4);padding:var(--sp3) var(--sp5);background:var(--s1);border-bottom:1px solid var(--line);position:sticky;top:0;z-index:5}
+.logo{font-weight:700;font-size:17px;letter-spacing:.2px;white-space:nowrap}.logo span{color:var(--acc)}
+.sub{color:var(--tx3);font-size:12.5px}
+.pill{display:inline-block;padding:1px var(--sp2);border:1px solid var(--line);border-radius:999px;font-size:12px;color:var(--tx2);white-space:nowrap}
+.grow{flex:1}
+.btn{background:var(--s2);border:1px solid var(--line);border-radius:6px;padding:var(--sp1) var(--sp3);cursor:pointer;color:var(--tx2)}
+.btn:hover{color:var(--tx);border-color:var(--tx3)}
+.btn[aria-pressed=true]{background:var(--accs);border-color:var(--acc);color:var(--tx)}
+:focus-visible{outline:2px solid var(--acc);outline-offset:2px}
+.banner{background:var(--accs);border-bottom:1px solid var(--line);padding:var(--sp2) var(--sp5);font-size:13px}
+.banner b{color:var(--acc)}
+.legend{padding:var(--sp2) var(--sp5);font-size:12.5px;color:var(--tx3);border-bottom:1px solid var(--line)}
+.legend b{color:var(--tx2);font-weight:600}
+.layout{display:grid;grid-template-columns:196px minmax(0,1fr)}
+nav{padding:var(--sp4) var(--sp3);border-right:1px solid var(--line);display:flex;flex-direction:column;gap:2px;position:sticky;top:57px;align-self:start;min-height:calc(100vh - 160px)}
+nav button{display:flex;justify-content:space-between;align-items:center;gap:var(--sp2);width:100%;text-align:left;background:none;border:0;border-radius:6px;padding:var(--sp2) var(--sp3);color:var(--tx2);cursor:pointer;position:relative}
+nav button:hover{background:var(--s2);color:var(--tx)}
+nav button[aria-current=page]{background:var(--accs);color:var(--tx);font-weight:600}
+nav button[aria-current=page]::before{content:"";position:absolute;left:0;top:8px;bottom:8px;width:3px;border-radius:2px;background:var(--acc)}
+nav .c{font-size:11.5px;color:var(--tx3);font-weight:400}
+main{padding:var(--sp5);min-width:0;max-width:1440px}
+h1{font-size:20px;margin:0 0 var(--sp1)}h2{font-size:15px;margin:0}h3{font-size:13px;margin:0 0 var(--sp2);color:var(--tx2);text-transform:uppercase;letter-spacing:.6px}
+.lead{color:var(--tx3);margin:0 0 var(--sp5)}
+.panel{background:var(--s1);border:1px solid var(--line);border-radius:var(--r);padding:var(--sp4) var(--sp5);margin-bottom:var(--sp5);min-width:0}
+.ph{display:flex;align-items:center;gap:var(--sp3);flex-wrap:wrap;margin-bottom:var(--sp3)}
+.kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(168px,1fr));gap:var(--sp3);margin-bottom:var(--sp5)}
+.kpi{background:var(--s1);border:1px solid var(--line);border-radius:var(--r);padding:var(--sp3) var(--sp4)}
+.kpi .l{font-size:12px;color:var(--tx3);text-transform:uppercase;letter-spacing:.5px}
+.kpi .v{font-size:24px;font-weight:650;margin:2px 0;white-space:nowrap}
+.kpi .d{font-size:12px;color:var(--tx3)}
+.kpi.hero{border-color:var(--acc);background:linear-gradient(var(--accs),var(--accs)),var(--s1)}
+.kpi.hero .v{color:var(--acc)}
+.kpi.meas{border-style:dashed}
+.tag{display:inline-block;font-size:10.5px;text-transform:uppercase;letter-spacing:.5px;padding:0 5px;border-radius:4px;border:1px solid var(--line);color:var(--tx3);vertical-align:1px;font-weight:600}
+.est{color:var(--tx3);font-weight:400;cursor:help}
+.na{color:var(--tx3)}
+.neg{color:var(--crit)}
+.g2{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:var(--sp5)}
+.g2>.panel{margin-bottom:0}.g2{margin-bottom:var(--sp5)}
+.seg{display:inline-flex;border:1px solid var(--line);border-radius:6px;overflow:hidden}
+.seg button{background:var(--s2);border:0;border-right:1px solid var(--line);padding:2px var(--sp3);cursor:pointer;color:var(--tx2)}
+.seg button:last-child{border-right:0}
+.seg button[aria-pressed=true]{background:var(--accs);color:var(--tx);font-weight:600}
+.lg{display:flex;gap:var(--sp4);font-size:12.5px;color:var(--tx2);flex-wrap:wrap}
+.lg i{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:6px;vertical-align:-1px}
+svg{display:block;overflow:visible}
+svg text{fill:var(--tx3);font-size:11px;font-family:var(--font)}
+.gl{stroke:var(--line);stroke-width:1}
+.base{stroke:var(--tx3);stroke-width:1}
+.s-after{fill:var(--aft)}.s-saved{fill:var(--acc)}.s-ovh{fill:var(--ovh)}
+.col .hit{fill:transparent}
+.col:hover .hit{fill:var(--tx);fill-opacity:.06}
+.hb{display:grid;grid-template-columns:minmax(80px,34%) 1fr auto;gap:var(--sp3);align-items:center;padding:5px 0;font-size:13px}
+.hb .hl{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.hb .ht{height:10px;background:var(--s2);border-radius:3px;overflow:hidden}
+.hb .ht i{display:block;height:100%;background:var(--acc);border-radius:0 3px 3px 0}
+.hb .hv{min-width:64px;text-align:right}
+.hb:hover .hl{color:var(--acc)}
+.tbar{display:flex;gap:var(--sp3);align-items:center;flex-wrap:wrap;margin-bottom:var(--sp3)}
+.tbar input[type=search]{background:var(--s2);border:1px solid var(--line);border-radius:6px;padding:5px var(--sp3);min-width:240px;color:var(--tx)}
+.tbar .chips{order:3;flex-basis:100%}
+.tbar .cnt{color:var(--tx3);font-size:12.5px;margin-left:auto}
+.tw{overflow-x:auto;border:1px solid var(--line);border-radius:var(--r);background:var(--s1)}
+table{border-collapse:collapse;width:100%;font-size:13px}
+th,td{padding:7px var(--sp3);text-align:left;white-space:nowrap;border-bottom:1px solid var(--line)}
+th{position:sticky;top:0;background:var(--s2);font-weight:600;color:var(--tx2);font-size:12px;cursor:pointer;user-select:none}
+th:hover{color:var(--tx)}
+th.r,td.r{text-align:right}
+th[aria-sort=ascending]::after{content:" \25B2";font-size:9px;color:var(--acc)}
+th[aria-sort=descending]::after{content:" \25BC";font-size:9px;color:var(--acc)}
+tbody tr:hover td{background:var(--s2)}
+tr.x{cursor:pointer}
+tr.open td{background:var(--accs)}
+tr.det td{white-space:normal;background:var(--s2);padding:var(--sp3) var(--sp4)}
+tr.det .dg{position:sticky;left:var(--sp4);max-width:min(820px,calc(100vw - 300px))}
+tbody tr:last-child td{border-bottom:0}
+.trunc{display:inline-block;max-width:280px;overflow:hidden;text-overflow:ellipsis;vertical-align:bottom}
+.mb{display:inline-flex;align-items:center;gap:var(--sp2);justify-content:flex-end}
+.mb .t{width:64px;height:6px;background:var(--s2);border-radius:3px;overflow:hidden;border:1px solid var(--line)}
+.mb .t i{display:block;height:100%;background:var(--acc)}
+.more{display:flex;gap:var(--sp2);justify-content:center;margin-top:var(--sp3)}
+.empty{padding:var(--sp6) var(--sp4);text-align:center;color:var(--tx3)}
+.empty b{display:block;color:var(--tx2);font-size:15px;margin-bottom:var(--sp1)}
+.dl{display:grid;grid-template-columns:max-content 1fr;gap:var(--sp1) var(--sp5);font-size:13px;margin:0}
+.dl dt{color:var(--tx3)}.dl dd{margin:0;min-width:0;overflow-wrap:anywhere}
+.dg{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:var(--sp2) var(--sp5)}
+.badge{--c:var(--neu);display:inline-flex;align-items:center;gap:5px;padding:1px var(--sp2);border-radius:999px;font-size:12px;font-weight:600;color:var(--c);background:color-mix(in srgb,var(--c) 15%,transparent);border:1px solid color-mix(in srgb,var(--c) 35%,transparent)}
+.badge::before{content:"";width:6px;height:6px;border-radius:50%;background:var(--c)}
+.b-active{--c:var(--good)}.b-stale{--c:var(--warn)}.b-redundant{--c:var(--ser)}.b-negative{--c:var(--crit)}.b-never_hit,.b-disabled{--c:var(--neu)}
+.b-disabled::before{background:transparent;border:1.5px solid var(--c);width:4px;height:4px}
+.chips{display:flex;gap:var(--sp2);flex-wrap:wrap}
+.chip{border:1px solid var(--line);background:var(--s2);border-radius:999px;padding:2px var(--sp3);cursor:pointer;font-size:12.5px;color:var(--tx2)}
+.chip[aria-pressed=true]{border-color:var(--acc);background:var(--accs);color:var(--tx)}
+.chip .n{color:var(--tx3);margin-left:4px}
+.sum{display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:var(--sp3);margin-bottom:var(--sp4)}
+.sum div{background:var(--s1);border:1px solid var(--line);border-radius:var(--r);padding:var(--sp2) var(--sp3)}
+.sum b{display:block;font-size:18px;font-variant-numeric:tabular-nums}
+.sum span{font-size:12px;color:var(--tx3)}
+.note{font-size:13px;color:var(--tx2)}.note li{margin-bottom:var(--sp1)}
+.note ul{margin:0;padding-left:18px}
+.warn{color:var(--warn)}
+.on{color:var(--good);font-weight:600}.off{color:var(--tx3);font-weight:600}
+ul.paths{margin:0;padding-left:18px}
+#tip{position:fixed;z-index:20;pointer-events:none;background:var(--s1);color:var(--tx);border:1px solid var(--line);border-radius:6px;padding:var(--sp2) var(--sp3);font-size:12.5px;box-shadow:0 6px 24px rgba(0,0,0,.25);max-width:420px;display:none;overflow-wrap:anywhere}
+#tip table{font-size:12.5px;width:auto}#tip td{padding:1px 0;border:0;background:none!important}#tip td+td{padding-left:var(--sp4);text-align:right}
+#tip .k{display:inline-block;width:8px;height:8px;border-radius:2px;margin-right:6px}
+footer{padding:var(--sp4) var(--sp5);color:var(--tx3);font-size:12px}
+@media(max-width:1000px){.layout{grid-template-columns:1fr}nav{position:static;min-height:0;flex-direction:row;overflow-x:auto;border-right:0;border-bottom:1px solid var(--line);padding:var(--sp2) var(--sp4)}nav button{width:auto;white-space:nowrap}nav button[aria-current=page]::before{left:8px;right:8px;top:auto;bottom:0;width:auto;height:2px}main{padding:var(--sp4)}}
+@media(max-width:860px){.g2{grid-template-columns:1fr}header.top{flex-wrap:wrap;padding:var(--sp3) var(--sp4)}.tbar input[type=search]{min-width:0;flex:1}}
+</style>
+</head>
+<body>
+<header class="top">
+ <div class="logo"><span>&#9670;</span> ttk</div>
+ <div class="sub">ThanosTokenKiller</div>
+ <span class="pill" id="ver"></span>
+ <div class="grow"></div>
+ <div class="sub" id="gen"></div>
+ <button class="btn" id="theme" type="button" aria-label="Toggle light/dark theme"></button>
+</header>
+<div id="banner"></div>
+<div class="legend"><b>~</b> = estimated by ttk's heuristic tokenizer &nbsp;&middot;&nbsp; <b>measured</b> = from the model provider's usage data. The two are shown separately and never added together.</div>
+<div class="layout"><nav id="nav" aria-label="Sections"></nav><main id="main"></main></div>
+<footer id="foot"></footer>
+<div id="tip" role="tooltip"></div>
+<script>
+"use strict";
+const DATA = /*__TTK_DATA__*/null;
+
+/* ---------- helpers ---------- */
+const A=x=>Array.isArray(x)?x.filter(r=>r&&typeof r==='object'):[];
+const O=x=>x&&typeof x==='object'&&!Array.isArray(x)?x:{};
+const isN=v=>typeof v==='number'&&isFinite(v);
+const $=(s,r)=>(r||document).querySelector(s);
+const ESC={'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'};
+const esc=s=>s==null?'':String(s).replace(/[&<>"']/g,c=>ESC[c]);
+const NS='\u202f';
+function fmtN(v){if(!isN(v))return'\u2014';const s=Math.round(Math.abs(v)).toString().replace(/\B(?=(\d{3})+(?!\d))/g,NS);return(v<0&&Math.round(v)!==0?'\u2212':'')+s}
+function fmtC(v){if(!isN(v))return'\u2014';const a=Math.abs(v),n=v<0?'\u2212':'';if(a<1e3)return n+Math.round(a);
+ for(const[d,s]of[[1e9,'B'],[1e6,'M'],[1e3,'k']])if(a>=d){const x=a/d;return n+(x>=100?Math.round(x):x.toFixed(1).replace(/\.0$/,''))+s}}
+function fmtP(v,dg){return isN(v)?v.toFixed(dg==null?1:dg).replace('-','\u2212')+'%':'\u2014'}
+let EST=true;
+const NA='<span class="na">\u2014</span>';
+const EP=()=>EST?'<span class="est" title="estimated by ttk\'s heuristic tokenizer">~</span>':'';
+/* ttk-side token value (estimated or not per totals.method) */
+function tk(v,c){if(!isN(v))return NA;const s=c?fmtC(v):fmtN(v);return`<span class="${v<0?'neg':''}"${c?` title="${fmtN(v)}"`:''}>${EP()}${s}</span>`}
+/* plain count or provider-measured value: never ~ */
+function ct(v,c){if(!isN(v))return NA;return c?`<span title="${fmtN(v)}">${fmtC(v)}</span>`:fmtN(v)}
+function tkP(v){return isN(v)?EP()+fmtP(v):NA}
+const p2=n=>String(n).padStart(2,'0');
+function fmtT(ms){if(!isN(ms)||ms<=0)return'\u2014';const d=new Date(ms);return`${d.getFullYear()}-${p2(d.getMonth()+1)}-${p2(d.getDate())} ${p2(d.getHours())}:${p2(d.getMinutes())}`}
+const MON=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+const dayMs=s=>{const m=/^(\d{4})-(\d\d)-(\d\d)$/.exec(s);return m?Date.UTC(+m[1],m[2]-1,+m[3]):NaN};
+const msDay=t=>{const d=new Date(t);return`${d.getUTCFullYear()}-${p2(d.getUTCMonth()+1)}-${p2(d.getUTCDate())}`};
+const dayLbl=s=>{const m=/^(\d{4})-(\d\d)-(\d\d)$/.exec(s);return m?MON[m[2]-1]+' '+(+m[3]):esc(s)};
+const base=p=>{if(p==null)return'';const a=String(p).split(/[\\/]/).filter(Boolean);return a.length?a[a.length-1]:String(p)};
+const pct=r=>isN(r.before)&&r.before>0&&isN(r.saved)?r.saved/r.before*100:isN(r.saved_pct)?r.saved_pct:null;
+const net=r=>isN(r.net)?r.net:isN(r.saved)&&isN(r.overhead)?r.saved-r.overhead:null;
+const sum=(a,k)=>a.reduce((s,r)=>s+(isN(r[k])?r[k]:0),0);
+const debounce=(f,ms)=>{let t;return(...a)=>{clearTimeout(t);t=setTimeout(()=>f(...a),ms)}};
+const empty=(t,s)=>`<div class="empty"><b>${t}</b>${s||''}</div>`;
+const tipAttr=h=>` data-tip="${esc(h)}"`;
+const tipRows=rows=>'<table>'+rows.map(r=>`<tr><td>${r[2]?`<i class="k" style="background:var(${r[2]})"></i>`:''}${r[0]}</td><td>${r[1]}</td></tr>`).join('')+'</table>';
+
+/* ---------- sample data (used only when no data was injected) ---------- */
+function makeSample(nS,nF){
+ let seed=1337;const R=()=>{seed=seed+0x6D2B79F5|0;let t=Math.imul(seed^seed>>>15,1|seed);t=t+Math.imul(t^t>>>7,61|t)^t;return((t^t>>>14)>>>0)/4294967296};
+ const pick=a=>a[Math.floor(R()*a.length)],ri=(a,b)=>a+Math.floor(R()*(b-a+1)),DAY=864e5,now=Date.now(),today=Math.floor(now/DAY)*DAY,ND=80;
+ const P=['C:\\Users\\dev\\code\\ThanosTokenKiller','C:\\Users\\dev\\code\\webshop','/home/dev/api-gateway','/home/dev/ml-pipeline','C:\\work\\infra-terraform','/home/dev/docs-site','/home/dev/mobile-app'];
+ const G=[['cargo',.82],['npm',.78],['pytest',.74],['git',.38],['rg',.12],['kubectl',.91],['go',.46],['jest',.55],['docker',.63],['tsc',.33],['ls',.04],['make',.29],['terraform',.7],['gradle',.8]];
+ const AG=['claude-code','claude-code','claude-code','codex','cursor'],MD={'claude-code':['claude-opus-5-5','claude-sonnet-5'],codex:['gpt-5.2-codex'],cursor:['claude-sonnet-5']};
+ const SUB=['Explore','general-purpose','Plan'];
+ const daily={},proj={},prog={},agents={},models={},sessions=[];
+ const add=(m,k,o)=>{const t=m[k]||(m[k]={});for(const x in o)t[x]=(t[x]||0)+o[x];return t};
+ let mt={messages:0,sessions:0,input:0,output:0,cache_read:0,cache_creation:0};
+ for(let i=0;i<nS;i++){
+  const first=today-Math.floor(Math.pow(R(),1.4)*ND)*DAY+ri(7,22)*36e5+ri(0,59)*6e4,last=first+ri(3,240)*6e4;
+  const project=P[Math.min(P.length-1,Math.floor(Math.pow(R(),1.6)*P.length))],agent=pick(AG),model=pick(MD[agent]);
+  const runs=ri(2,70),subagents=R()<.45?ri(1,4):0;let before=0,after=0;
+  for(let k=0;k<3;k++){const g=pick(G),r=k<2?Math.floor(runs/3):runs-2*Math.floor(runs/3),b=r*ri(300,5200),a=Math.round(b*(1-g[1]*(.75+R()*.3)));before+=b;after+=a;add(prog,g[0],{runs:r,before:b,after:a,saved:b-a})}
+  const saved=before-after,overhead=runs*ri(12,45)+ri(0,600),mtot=agent!=='cursor'&&R()<.85?ri(60,2800)*1000:null;
+  const id=Array.from({length:4},()=>Math.floor(R()*65536).toString(16).padStart(4,'0')).join('')+'-'+ri(4096,65535).toString(16)+'-4'+ri(256,4095).toString(16)+'-'+ri(32768,49151).toString(16)+'-'+Array.from({length:3},()=>Math.floor(R()*65536).toString(16).padStart(4,'0')).join('');
+  const s={id,project,agent,model,runs,subagents,before,after,saved,overhead,first_at:first,last_at:last};if(mtot!=null)s.measured_total=mtot;sessions.push(s);
+  add(daily,msDay(first),{runs,before,after,saved,overhead});
+  const pr=add(proj,project,{runs,before,after,saved,overhead});pr.last_at=Math.max(pr.last_at||0,last);
+  const sp=subagents?.3:0,sub={runs:Math.round(runs*sp),before:Math.round(before*sp),after:Math.round(after*sp),overhead:Math.round(overhead*sp)};sub.saved=sub.before-sub.after;
+  add(agents,'main',{runs:runs-sub.runs,before:before-sub.before,after:after-sub.after,saved:saved-sub.saved,overhead:overhead-sub.overhead});if(subagents)add(agents,pick(SUB),sub);
+  const msg=mtot!=null?runs*ri(2,5):0,io=mtot!=null?{input:Math.round(mtot*.04),output:Math.round(mtot*.02),cache_read:Math.round(mtot*.8)}:{input:0,output:0,cache_read:0};if(mtot!=null)io.cache_creation=mtot-io.input-io.output-io.cache_read;else io.cache_creation=0;
+  add(models,model,Object.assign({runs,saved,messages:msg},io));
+  if(mtot!=null){mt.sessions++;mt.messages+=msg;for(const k in io)mt[k]+=io[k]}
+ }
+ const toArr=(m,kn)=>Object.keys(m).map(k=>Object.assign({[kn]:k},m[k]));
+ const totals={runs:0,before:0,after:0,saved:0,overhead:0};for(const s of sessions)for(const k in totals)totals[k]+=s[k];
+ const T={runs:totals.runs,passthrough_runs:Math.round(totals.runs*.13),tokens_before:totals.before,tokens_after:totals.after,saved:totals.saved,saved_pct:totals.saved/totals.before*100,overhead:totals.overhead,net:totals.saved-totals.overhead,method:'estimated',filtered_lines:ri(80000,140000),skipped_lines:3,first_at:Math.min(...sessions.map(s=>s.first_at)),last_at:Math.max(...sessions.map(s=>s.last_at))};
+ mt.total=mt.input+mt.output+mt.cache_read+mt.cache_creation;mt.available=true;
+ const ST=['active','active','active','active','stale','never_hit','redundant','negative','disabled'],SC=['npm install','cargo build','cargo test','pytest -q','kubectl logs','docker build','gradle build','terraform plan','*'];
+ const PT=['npm WARN deprecated <*>','   Compiling <*> v<*>','Downloading <*> (<*> KB)','<*> INFO  [main] request served in <*>ms','#<*> [internal] load metadata for <*>','Step <*>/<*> : RUN <*>','Progress: resolved <*>, reused <*>, downloaded <*>','> Task :<*>:compileJava UP-TO-DATE','Refreshing state... [id=<*>]','collected <*> items'];
+ const filters=[];for(let i=0;i<nF;i++){const st=pick(ST),teach=ri(60,900),hits=st==='never_hit'?0:st==='negative'?ri(1,3):ri(4,900),lr=hits*ri(1,10),ts=st==='negative'?ri(5,teach-20):lr*ri(3,9);const id='flt_'+(4096+i*37).toString(16);
+  const f={id,scope:pick(SC),pattern:pick(PT),action:pick(['trash','trash','trash','fold','only']),origin:R()<.7?'project':'user',enabled:st!=='disabled',when:pick(['any','success','failure']),hits,lines_removed:lr,tokens_saved:st==='never_hit'?0:ts,teach_tokens:teach,created_at:today-ri(5,70)*DAY,status:st,findings:[]};
+  f.net=f.tokens_saved-teach;if(hits)f.last_hit_at=st==='stale'?today-ri(31,60)*DAY:now-ri(1,600)*6e4;
+  if(st==='redundant')f.findings.push('subsumed by flt_'+(4096+ri(0,nF-1)*37).toString(16));if(st==='stale')f.findings.push('no hit in the last 30 days');if(st==='negative')f.findings.push('teach cost exceeds tokens saved');
+  filters.push(f)}
+ const pa=toArr(proj,'name').map((p,i)=>Object.assign(p,{id:'p'+(1000+i).toString(36),saved_pct:p.saved/p.before*100}));
+ const ga=toArr(prog,'name').map(p=>Object.assign(p,{saved_pct:p.saved/p.before*100}));
+ return{version:'0.2.0 (sample)',generated_at:now,totals:T,measured:mt,daily:toArr(daily,'day').sort((a,b)=>a.day<b.day?-1:1),projects:pa,programs:ga,sessions,agents:toArr(agents,'name'),models:toArr(models,'model'),filters,
+  settings:{mode:'safe',ledger_path:'C:\\Users\\dev\\.ttk\\ledger.jsonl',global_dir:'C:\\Users\\dev\\.ttk',config_files:['C:\\Users\\dev\\.ttk\\config.toml','C:\\Users\\dev\\code\\ThanosTokenKiller\\.ttk\\config.toml'],hooks_installed:true,
+   learning:{enabled:true,min_hits_before_active:3,stale_after_days:30,auto_retire:false},capsules:{max_age_days:14,max_total_mb:512},compilers:{log_cluster:'balanced',json_summary:true,test_runners:['cargo','pytest','jest','go']}}}
+}
+
+/* ---------- state ---------- */
+let D,SAMPLE=false,built={},cur='overview',range=30;
+const SECTIONS=[['overview','Overview'],['sessions','Sessions'],['projects','Projects'],['commands','Commands'],['models','Models & Agents'],['filters','Filters'],['settings','Settings']];
+function norm(x){x=O(x);const d={version:x.version,generated_at:x.generated_at,totals:O(x.totals),measured:O(x.measured),daily:A(x.daily),projects:A(x.projects),programs:A(x.programs),sessions:A(x.sessions),agents:A(x.agents),models:A(x.models),filters:A(x.filters),settings:O(x.settings)};
+ const t=d.totals;if(!isN(t.net)&&isN(t.saved)&&isN(t.overhead))t.net=t.saved-t.overhead;return d}
+
+function boot(raw){SAMPLE=raw==null;D=norm(SAMPLE?makeSample(240,48):raw);EST=D.totals.method!=='measured';built={};
+ $('#ver').textContent=D.version?'v'+String(D.version).replace(/^v/,''):'version unknown';
+ $('#gen').textContent=isN(D.generated_at)?'generated '+fmtT(D.generated_at):'';
+ $('#banner').innerHTML=SAMPLE?'<div class="banner"><b>Sample data.</b> No ttk data was embedded in this file, so a built-in example dataset is shown. Every number on this page is made up.</div>':'';
+ $('#foot').innerHTML=`ttk local dashboard &middot; offline, no network requests &middot; token method: <b>${esc(D.totals.method||'unknown')}</b>`;
+ const cnt={sessions:D.sessions.length,projects:D.projects.length,commands:D.programs.length,models:D.models.length+D.agents.length,filters:D.filters.length};
+ $('#nav').innerHTML=SECTIONS.map(([k,l])=>`<button type="button" data-s="${k}">${l}${cnt[k]!=null?`<span class="c num">${fmtC(cnt[k])}</span>`:''}</button>`).join('');
+ const main=$('#main');main.innerHTML=SECTIONS.map(([k])=>`<section id="s-${k}" hidden></section>`).join('');
+ go((location.hash||'').slice(1),true)}
+function go(k,force){if(!SECTIONS.some(s=>s[0]===k))k='overview';cur=k;
+ for(const[s]of SECTIONS){$('#s-'+s).hidden=s!==k;const b=$(`#nav [data-s="${s}"]`);if(s===k)b.setAttribute('aria-current','page');else b.removeAttribute('aria-current')}
+ if(!built[k]){built[k]=1;RENDER[k]($('#s-'+k))}if(location.hash.slice(1)!==k)history.replaceState(null,'','#'+k)}
+
+/* ---------- table component ---------- */
+function table(host,o){
+ const rows=o.rows,cols=o.cols,ps=o.page||50,cm={};cols.forEach(c=>cm[c.k]=c);
+ const st={k:o.sort||null,d:o.dir||-1,q:'',lim:ps,open:new Set(),chip:null};
+ const txt=cols.filter(c=>c.txt);for(const r of rows)r.__s=txt.map(c=>{const v=c.v?c.v(r):r[c.k];return v==null?'':String(v)}).join(' \u0001').toLowerCase();
+ host.innerHTML=`<div class="tbar"><input type="search" placeholder="${esc(o.ph||'Filter rows\u2026')}" aria-label="Filter rows">${o.chips?`<div class="chips">${o.chips}</div>`:''}<span class="cnt num"></span></div>`+
+  `<div class="tw"><table><thead><tr>${cols.map(c=>`<th data-k="${c.k}" class="${c.n?'r':''}" tabindex="0" aria-sort="none"${c.h?` title="${esc(c.h)}"`:''}>${c.l}</th>`).join('')}</tr></thead><tbody></tbody></table></div><div class="more"></div>`;
+ const tb=$('tbody',host),cnt=$('.cnt',host),more=$('.more',host);let view=rows;
+ const val=c=>c.v||(r=>r[c.k]);
+ function compute(){let r=rows;const q=st.q;if(q)r=r.filter(x=>x.__s.indexOf(q)>=0);if(st.chip&&o.chipFn)r=r.filter(x=>o.chipFn(x,st.chip));
+  if(st.k&&cm[st.k]){const g=val(cm[st.k]),d=st.d;if(r===rows)r=r.slice();
+   const m=r.map(x=>{let v=g(x);if(typeof v==='string')v=v.toLowerCase();return[v==null||v===''||(typeof v==='number'&&!isFinite(v))?null:v,x]});
+   m.sort((a,b)=>{const x=a[0],y=b[0];if(x===null||y===null)return x===y?0:x===null?1:-1;return(x<y?-1:x>y?1:0)*d});r=m.map(e=>e[1])}
+  view=r}
+ function paint(){const n=view.length,nc=cols.length;
+  if(!rows.length)tb.innerHTML=`<tr><td colspan="${nc}">${o.empty}</td></tr>`;
+  else if(!n)tb.innerHTML=`<tr><td colspan="${nc}">${empty('No rows match','Try a different filter.')}</td></tr>`;
+  else{const out=[],m=Math.min(n,st.lim);for(let i=0;i<m;i++){const r=view[i],id=o.key?o.key(r):r,op=st.open.has(id);
+    out.push(`<tr${o.detail?` class="x${op?' open':''}" tabindex="0" aria-expanded="${op}"`:''} data-i="${i}">`);for(const c of cols)out.push(`<td class="${c.n?'r':''}">${c.f?c.f(r):esc(r[c.k])}</td>`);out.push('</tr>');
+    if(op)out.push(`<tr class="det"><td colspan="${nc}">${o.detail(r)}</td></tr>`)}tb.innerHTML=out.join('')}
+  cnt.textContent=rows.length?(n<rows.length?`${fmtN(n)} of ${fmtN(rows.length)} rows`:`${fmtN(n)} rows`)+(n>st.lim?` \u00b7 showing ${fmtN(st.lim)}`:''):'';
+  more.innerHTML=n>st.lim?`<button class="btn" data-m="1">Show ${fmtN(Math.min(ps*4,n-st.lim))} more</button>${n<=3000?'<button class="btn" data-m="all">Show all</button>':''}`:'';
+  host.querySelectorAll('th').forEach(th=>th.setAttribute('aria-sort',th.dataset.k===st.k?(st.d>0?'ascending':'descending'):'none'))}
+ const sortBy=k=>{if(st.k===k)st.d=-st.d;else{st.k=k;st.d=cm[k].n?-1:1}st.lim=ps;compute();paint()};
+ $('thead',host).addEventListener('click',e=>{const th=e.target.closest('th');if(th)sortBy(th.dataset.k)});
+ $('thead',host).addEventListener('keydown',e=>{const th=e.target.closest('th');if(th&&(e.key==='Enter'||e.key===' ')){e.preventDefault();sortBy(th.dataset.k)}});
+ const toggle=tr=>{if(!o.detail||!tr||!tr.classList.contains('x'))return;const r=view[+tr.dataset.i],id=o.key?o.key(r):r;st.open.has(id)?st.open.delete(id):st.open.add(id);paint();const n=tb.querySelector(`tr[data-i="${tr.dataset.i}"]`);n&&n.focus()};
+ tb.addEventListener('click',e=>{if(e.target.closest('a,button,tr.det'))return;toggle(e.target.closest('tr'))});
+ tb.addEventListener('keydown',e=>{if(e.key==='Enter'||e.key===' '){const tr=e.target.closest('tr.x');if(tr){e.preventDefault();toggle(tr)}}});
+ more.addEventListener('click',e=>{const b=e.target.closest('button');if(!b)return;st.lim=b.dataset.m==='all'?view.length:st.lim+ps*4;paint()});
+ $('input',host).addEventListener('input',debounce(e=>{st.q=e.target.value.trim().toLowerCase();st.lim=ps;compute();paint()},120));
+ if(o.chips)$('.chips',host).addEventListener('click',e=>{const b=e.target.closest('[data-chip]');if(!b)return;st.chip=b.dataset.chip==='all'?null:b.dataset.chip;
+  host.querySelectorAll('[data-chip]').forEach(x=>x.setAttribute('aria-pressed',String(x===b)));st.lim=ps;compute();paint()});
+ compute();paint()}
+
+/* column helpers */
+const cN=(k,l,h)=>({k,l,n:1,h,f:r=>ct(r[k])});
+const cT=(k,l,h)=>({k,l,n:1,h,f:r=>tk(r[k])});
+const cTime=(k,l)=>({k,l,n:1,f:r=>fmtT(r[k])});
+const cPct={k:'pct',l:'Saved %',n:1,v:pct,h:'saved / tokens before',f:r=>{const p=pct(r);if(!isN(p))return NA;return`<span class="mb"><span class="t"><i style="width:${Math.max(0,Math.min(100,p)).toFixed(1)}%"></i></span>${tkP(p)}</span>`}};
+const cNet={k:'net',l:'Net',n:1,v:net,h:'saved \u2212 overhead',f:r=>tk(net(r))};
+const mLbl=l=>`${l}<br><span class="tag">meas.</span>`;
+const pathCol=(k,l)=>({k,l,txt:1,f:r=>r[k]==null?NA:`<span class="trunc" title="${esc(r[k])}">${esc(base(r[k]))}</span>`});
+
+/* ---------- charts ---------- */
+function niceStep(x){if(!(x>0))return 1;const p=Math.pow(10,Math.floor(Math.log10(x))),f=x/p;return(f<=1?1:f<=2?2:f<=2.5?2.5:f<=5?5:10)*p}
+function series(n){const pts=D.daily.filter(d=>isFinite(dayMs(d.day))).slice().sort((a,b)=>a.day<b.day?-1:a.day>b.day?1:0);if(!pts.length)return[];
+ const map=new Map();for(const p of pts){const e=map.get(p.day);if(e)for(const k of['runs','before','after','saved','overhead'])e[k]=(e[k]||0)+(isN(p[k])?p[k]:0);else map.set(p.day,Object.assign({},p))}
+ const last=dayMs(pts[pts.length-1].day),first=dayMs(pts[0].day);let start=n==='all'?first:Math.max(first,last-(n-1)*864e5);
+ let out=[];for(let t=start;t<=last;t+=864e5){const k=msDay(t);out.push(map.get(k)||{day:k})}
+ if(out.length>120){const w=[];for(let i=0;i<out.length;i+=7){const g=out.slice(i,i+7),b={day:g[0].day,to:g[g.length-1].day};for(const k of['runs','before','after','saved','overhead'])b[k]=sum(g,k);w.push(b)}out=w}
+ return out}
+function ptTip(p){const lbl=p.to?`${dayLbl(p.day)} \u2013 ${dayLbl(p.to)}`:dayLbl(p.day)+(p.day?' '+p.day.slice(0,4):'');
+ if(!isN(p.before)&&!isN(p.runs))return`<b>${lbl}</b><div class="sub">no runs recorded</div>`;
+ return`<b>${lbl}</b>`+tipRows([['Before',tk(p.before)],['After (sent)',tk(p.after),'--aft'],['Saved',tk(p.saved),'--acc'],['Overhead',tk(p.overhead),'--ovh'],['Net',tk(net(p))],['Runs',ct(p.runs)]])}
+function topR(x,y,w,h,r){r=Math.min(r,w/2,h);return`M${x},${y+h}V${y+r}Q${x},${y} ${x+r},${y}H${x+w-r}Q${x+w},${y} ${x+w},${y+r}V${y+h}Z`}
+function barChart(host,pts,ser,H){
+ const W=Math.max(300,host.clientWidth||700),pl=48,pr=6,pt=8,pb=24,iw=W-pl-pr,ih=H-pt-pb,n=pts.length;
+ let mx=0;for(const p of pts){let s=0;for(const q of ser)s+=Math.max(0,isN(p[q.k])?p[q.k]:0);if(s>mx)mx=s}
+ const step=niceStep((mx||1)/4),ym=Math.max(step,Math.ceil((mx||1)/step)*step),y=v=>pt+ih-v/ym*ih;
+ const o=[`<svg width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" role="img" aria-label="${esc(host.dataset.label||'chart')}">`];
+ for(let v=0;v<=ym+1e-9;v+=step){const yy=y(v).toFixed(1);o.push(`<line class="${v?'gl':'base'}" x1="${pl}" x2="${W-pr}" y1="${yy}" y2="${yy}"/><text x="${pl-6}" y="${(+yy+4).toFixed(1)}" text-anchor="end">${EST&&v?'~':''}${fmtC(v)}</text>`)}
+ const bw=iw/n,gap=bw>6?Math.max(1,bw*.22):bw>2?1:0,w=Math.max(.6,bw-gap),every=Math.ceil(n/Math.max(2,Math.floor(iw/70)));
+ for(let i=0;i<n;i++){const p=pts[i],x=pl+i*bw+gap/2;o.push(`<g class="col"${tipAttr(ptTip(p))}><rect class="hit" x="${(pl+i*bw).toFixed(1)}" y="${pt}" width="${bw.toFixed(2)}" height="${ih}"/>`);
+  let acc=0;ser.forEach((q,j)=>{const v=Math.max(0,isN(p[q.k])?p[q.k]:0);if(!v)return;const y0=y(acc),y1=y(acc+v);let h=y0-y1-(acc>0&&w>3?2:0);acc+=v;if(h<=0)h=.5;
+   const top=j===ser.length-1||!ser.slice(j+1).some(s=>(p[s.k]||0)>0);o.push(top&&w>4?`<path class="${q.c}" d="${topR(x,y1,w,h,3)}"/>`:`<rect class="${q.c}" x="${x.toFixed(2)}" y="${y1.toFixed(2)}" width="${w.toFixed(2)}" height="${h.toFixed(2)}"/>`)});
+  o.push('</g>');if(i%every===0)o.push(`<text x="${(pl+i*bw+bw/2).toFixed(1)}" y="${H-6}" text-anchor="middle">${dayLbl(p.day)}</text>`)}
+ o.push('</svg>');host.innerHTML=o.join('')}
+function hbars(items,o){if(!items.length)return empty(o.empty||'Nothing yet');const mx=Math.max(1,...items.map(o.v).map(v=>Math.max(0,v||0)));
+ return items.map(r=>{const v=o.v(r)||0;return`<div class="hb"${tipAttr(o.tip(r))}><span class="hl">${esc(o.l(r))}</span><span class="ht"><i style="width:${(Math.max(0,v)/mx*100).toFixed(1)}%"></i></span><span class="hv num">${tk(v,1)}</span></div>`}).join('')}
+
+/* ---------- sections ---------- */
+const RENDER={};
+RENDER.overview=el=>{const t=D.totals,m=D.measured;
+ const hasAny=isN(t.runs)&&t.runs>0||D.daily.length>0;
+ if(!hasAny){el.innerHTML=`<h1>Overview</h1>`+`<div class="panel">${empty('No commands recorded yet \u2014 run a command through ttk','e.g. <code>ttk run -- cargo test</code>. This page fills in as the ledger grows.')}</div>`;return}
+ const sp=isN(t.tokens_before)&&t.tokens_before>0&&isN(t.saved)?t.saved/t.tokens_before*100:t.saved_pct;
+ const pass=isN(t.runs)&&t.runs>0&&isN(t.passthrough_runs)?t.passthrough_runs/t.runs*100:null;
+ const kpi=(l,v,d,c)=>`<div class="kpi ${c||''}"><div class="l">${l}</div><div class="v">${v}</div><div class="d">${d}</div></div>`;
+ const meas=m.available?kpi('Model usage <span class="tag">measured</span>',ct(m.total,1),`${ct(m.messages)} messages \u00b7 ${ct(m.sessions)} sessions`,'meas'):kpi('Model usage <span class="tag">measured</span>','<span class="na">n/a</span>','no provider usage data found','meas');
+ el.innerHTML=`<h1>Overview</h1><p class="lead">${isN(t.first_at)&&t.first_at>0?`Recorded ${fmtT(t.first_at)} \u2192 ${fmtT(t.last_at)}`:'Recording period unknown'}</p>
+ <div class="kpis">${kpi('Net saved',tk(t.net,1),'gross saved \u2212 ttk overhead','hero')}${kpi('Gross saved',tk(t.saved,1),`of ${tk(t.tokens_before,1)} tokens before`)}${kpi('Saved %',tkP(sp),'of raw tool output')}
+ ${kpi('TTK overhead',tk(t.overhead,1),'tokens ttk itself adds')}${kpi('Commands processed',ct(t.runs,1),`${ct(t.filtered_lines,1)} lines filtered`)}${kpi('Passthrough share',isN(pass)?fmtP(pass):NA,`${ct(t.passthrough_runs)} runs passed through unchanged`)}${meas}</div>
+ <div class="panel"><div class="ph"><h2 id="ch-t">Tokens per day</h2><div class="seg" id="rng">${[14,30,90,'all'].map(r=>`<button type="button" data-r="${r}" aria-pressed="${r===range}">${r==='all'?'All':r+'d'}</button>`).join('')}</div><div class="grow"></div>
+  <div class="lg"><span><i style="background:var(--aft)"></i>After (sent to agent)</span><span><i style="background:var(--acc)"></i>Saved by ttk</span></div></div>
+  <div id="ch-main" data-label="Daily tokens after and saved"></div>
+  <div class="ph" style="margin:var(--sp4) 0 var(--sp2)"><h3 style="margin:0" id="ch-t2">TTK overhead per day</h3><div class="grow"></div><div class="lg"><span><i style="background:var(--ovh)"></i>Overhead (own scale)</span></div></div>
+  <div id="ch-ovh" data-label="Daily ttk overhead"></div></div>
+ <div class="g2"><div class="panel"><div class="ph"><h2>Top projects</h2><div class="grow"></div><span class="sub">by tokens saved</span></div>${hbars(D.projects.slice().sort((a,b)=>(b.saved||0)-(a.saved||0)).slice(0,7),{l:r=>base(r.name)||r.id||'?',v:r=>r.saved,empty:'No projects yet',tip:r=>`<b>${esc(r.name)}</b>`+tipRows([['Saved',tk(r.saved)],['Saved %',tkP(pct(r))],['Overhead',tk(r.overhead)],['Runs',ct(r.runs)]])})}</div>
+ <div class="panel"><div class="ph"><h2>Top commands</h2><div class="grow"></div><span class="sub">by tokens saved</span></div>${hbars(D.programs.slice().sort((a,b)=>(b.saved||0)-(a.saved||0)).slice(0,7),{l:r=>r.name||'?',v:r=>r.saved,empty:'No commands yet',tip:r=>`<b>${esc(r.name)}</b>`+tipRows([['Saved',tk(r.saved)],['Saved %',tkP(pct(r))],['Runs',ct(r.runs)]])})}</div></div>
+ <div class="g2">${m.available?`<div class="panel"><div class="ph"><h2>Model usage</h2><span class="tag">measured</span></div><p class="sub" style="margin-top:0">Reported by the model provider. Shown for context only \u2014 not added to ttk's estimated savings.</p>
+  <dl class="dl"><dt>Input</dt><dd class="num">${ct(m.input)}</dd><dt>Output</dt><dd class="num">${ct(m.output)}</dd><dt>Cache read</dt><dd class="num">${ct(m.cache_read)}</dd><dt>Cache creation</dt><dd class="num">${ct(m.cache_creation)}</dd><dt>Total</dt><dd class="num"><b>${ct(m.total)}</b></dd><dt>Messages</dt><dd class="num">${ct(m.messages)}</dd><dt>Sessions</dt><dd class="num">${ct(m.sessions)}</dd></dl></div>`:''}
+ <div class="panel"><div class="ph"><h2>Data quality</h2></div><div class="note"><ul>
+  <li>Counting method: <b>${esc(t.method||'unknown')}</b>${EST?' \u2014 token counts come from ttk\'s heuristic tokenizer and are approximate (marked ~).':'.'}</li>
+  <li>${isN(t.skipped_lines)&&t.skipped_lines>0?`<span class="warn">${fmtN(t.skipped_lines)} ledger line${t.skipped_lines===1?'':'s'} could not be parsed and were skipped.</span>`:isN(t.skipped_lines)?'All ledger lines parsed (0 skipped).':'Skipped ledger lines: unknown.'}</li>
+  <li>Net savings subtract ttk's own overhead (${tk(t.overhead)}) from gross savings.</li>
+  <li>${m.available?'Provider usage is measured and kept separate from ttk\'s estimates.':'No measured provider usage was available for this report.'}</li></ul></div></div></div>`;
+ el.querySelector('#rng').addEventListener('click',e=>{const b=e.target.closest('button');if(!b)return;range=b.dataset.r==='all'?'all':+b.dataset.r;el.querySelectorAll('#rng button').forEach(x=>x.setAttribute('aria-pressed',String(x===b)));drawCharts()});
+ drawCharts()};
+function drawCharts(){const a=$('#ch-main'),b=$('#ch-ovh');if(!a||$('#s-overview').hidden)return;const pts=series(range);
+ if(!pts.length){a.innerHTML=empty('No daily data yet','Daily totals appear after the first recorded run.');b.innerHTML='';return}
+ const wk=!!pts[0].to;$('#ch-t').textContent=wk?'Tokens per week':'Tokens per day';$('#ch-t2').textContent=wk?'TTK overhead per week':'TTK overhead per day';
+ barChart(a,pts,[{k:'after',c:'s-after'},{k:'saved',c:'s-saved'}],250);barChart(b,pts,[{k:'overhead',c:'s-ovh'}],110)}
+
+RENDER.sessions=el=>{el.innerHTML='<h1>Sessions</h1><p class="lead">One row per agent session. Click a row for details.</p><div></div>';
+ table(el.lastElementChild,{rows:D.sessions,key:r=>r.id,sort:'last_at',ph:'Filter by id, project, agent, model\u2026',
+  empty:empty('No sessions recorded yet \u2014 run a command through ttk','Sessions appear once an agent runs commands via ttk.'),
+  cols:[{k:'id',l:'Session',txt:1,f:r=>`<span class="mono" title="${esc(r.id)}">${esc(String(r.id||'\u2014').slice(0,8))}</span>`},pathCol('project','Project'),{k:'agent',l:'Agent',txt:1},{k:'model',l:'Model',txt:1},
+   cN('runs','Runs'),cN('subagents','Subagents'),cT('before','Before'),cT('after','After'),cT('saved','Saved'),cT('overhead','Overhead'),
+   {k:'measured_total',l:mLbl('Measured'),n:1,h:'total tokens reported by the provider for this session',f:r=>ct(r.measured_total)},cTime('first_at','First'),cTime('last_at','Last')],
+  detail:r=>`<div class="dg"><dl class="dl"><dt>Session id</dt><dd class="mono">${esc(r.id)}</dd><dt>Project</dt><dd class="mono">${esc(r.project)}</dd><dt>Agent / model</dt><dd>${esc(r.agent||'\u2014')} \u00b7 ${esc(r.model||'\u2014')}</dd><dt>Duration</dt><dd>${isN(r.first_at)&&isN(r.last_at)&&r.last_at>=r.first_at?Math.round((r.last_at-r.first_at)/6e4)+' min':'\u2014'}</dd></dl>
+   <dl class="dl"><dt>Saved %</dt><dd>${tkP(pct(r))}</dd><dt>Net saved</dt><dd>${tk(net(r))}</dd><dt>Avg saved / run</dt><dd>${isN(r.saved)&&r.runs?tk(r.saved/r.runs):NA}</dd><dt>Measured usage</dt><dd>${ct(r.measured_total)} ${isN(r.measured_total)?'<span class="tag">measured</span>':''}</dd></dl></div>`})};
+
+RENDER.projects=el=>{el.innerHTML='<h1>Projects</h1><p class="lead">Savings per working directory.</p><div></div>';
+ table(el.lastElementChild,{rows:D.projects,key:r=>r.id||r.name,sort:'saved',ph:'Filter by path\u2026',empty:empty('No projects yet \u2014 run a command through ttk'),
+  cols:[{k:'name',l:'Project',txt:1,f:r=>`<b>${esc(base(r.name)||r.id||'—')}</b><br><span class="mono trunc sub" title="${esc(r.name)}">${esc(r.name)}</span>`},cN('runs','Runs'),cT('before','Before'),cT('after','After'),cT('saved','Saved'),cPct,cT('overhead','Overhead'),cNet,cTime('last_at','Last run')]})};
+
+RENDER.commands=el=>{el.innerHTML='<h1>Commands</h1><p class="lead">Savings per program (the first word of the command).</p><div></div>';
+ table(el.lastElementChild,{rows:D.programs,key:r=>r.name,sort:'saved',ph:'Filter by program\u2026',empty:empty('No commands recorded yet \u2014 run a command through ttk'),
+  cols:[{k:'name',l:'Program',txt:1,f:r=>`<span class="mono">${esc(r.name)}</span>`},cN('runs','Runs'),cT('before','Before'),cT('after','After'),cT('saved','Saved'),cPct,{k:'avg',l:'Saved / run',n:1,v:r=>isN(r.saved)&&r.runs?r.saved/r.runs:null,f:r=>tk(isN(r.saved)&&r.runs?r.saved/r.runs:null)}]})};
+
+RENDER.models=el=>{el.innerHTML=`<h1>Models &amp; Agents</h1><p class="lead">Columns tagged <span class="tag">meas.</span> come from the provider's usage data; the others are ttk estimates. They are never summed.</p>
+ <div class="panel"><div class="ph"><h2>Per model</h2></div><div id="t-mod"></div></div><div class="panel"><div class="ph"><h2>Per agent</h2><span class="sub">main thread and subagents</span></div><div id="t-ag"></div></div>`;
+ table($('#t-mod',el),{rows:D.models,key:r=>r.model,sort:'saved',ph:'Filter models\u2026',empty:empty('No model data yet'),
+  cols:[{k:'model',l:'Model',txt:1,f:r=>`<span class="mono">${esc(r.model)}</span>`},cN('runs','Runs'),cT('saved','Saved'),{k:'messages',l:mLbl('Messages'),n:1,f:r=>ct(r.messages)},
+   {k:'input',l:mLbl('Input'),n:1,f:r=>ct(r.input)},{k:'output',l:mLbl('Output'),n:1,f:r=>ct(r.output)},{k:'cache_read',l:mLbl('Cache read'),n:1,f:r=>ct(r.cache_read)},{k:'cache_creation',l:mLbl('Cache write'),n:1,f:r=>ct(r.cache_creation)}]});
+ table($('#t-ag',el),{rows:D.agents,key:r=>r.name,sort:'saved',ph:'Filter agents\u2026',empty:empty('No agent data yet'),
+  cols:[{k:'name',l:'Agent',txt:1},cN('runs','Runs'),cT('before','Before'),cT('after','After'),cT('saved','Saved'),cT('overhead','Overhead'),cNet]})};
+
+const FST=['active','stale','never_hit','redundant','negative','disabled'];
+const fstat=f=>f.status||(f.enabled===false?'disabled':'active');
+const badge=s=>`<span class="badge b-${esc(s)}">${esc(String(s).replace('_',' '))}</span>`;
+RENDER.filters=el=>{const F=D.filters,c={};for(const f of F){const s=fstat(f);c[s]=(c[s]||0)+1}
+ const tn=sum(F,'net'),ts=sum(F,'tokens_saved'),tt=sum(F,'teach_tokens');
+ const other=Object.keys(c).filter(s=>FST.indexOf(s)<0);
+ el.innerHTML=`<h1>Filters</h1><p class="lead">Learned filters remove noise lines before output reaches the agent. Teach cost is what it took to learn the rule; net = tokens saved \u2212 teach cost.</p>
+ ${F.length?`<div class="sum"><div><b>${fmtN(F.length)}</b><span>filters</span></div>${FST.map(s=>`<div><b>${fmtN(c[s]||0)}</b><span>${badge(s)}</span></div>`).join('')}<div><b>${tk(ts,1)}</b><span>tokens saved</span></div><div><b>${tk(tt,1)}</b><span>teach cost</span></div><div><b>${tk(tn,1)}</b><span>net</span></div></div>`:''}<div></div>`;
+ table(el.lastElementChild,{rows:F,key:r=>r.id||r,sort:'net',ph:'Filter by id, scope, pattern\u2026',
+  chips:F.length?`<button type="button" class="chip" data-chip="all" aria-pressed="true">All<span class="n">${fmtN(F.length)}</span></button>`+FST.concat(other).filter(s=>c[s]).map(s=>`<button type="button" class="chip" data-chip="${esc(s)}" aria-pressed="false">${esc(s.replace('_',' '))}<span class="n">${fmtN(c[s])}</span></button>`).join(''):'',
+  chipFn:(r,ch)=>fstat(r)===ch,
+  empty:empty('No filters learned yet','Teach one with <code>ttk learn --last</code> after a noisy command.'),
+  cols:[{k:'status',l:'Status',txt:1,v:fstat,f:r=>badge(fstat(r))},{k:'id',l:'Id',txt:1,f:r=>`<span class="mono">${esc(r.id)}</span>`},{k:'scope',l:'Scope',txt:1,f:r=>`<span class="mono">${esc(r.scope)}</span>`},
+   {k:'pattern',l:'Pattern',txt:1,f:r=>`<span class="mono trunc" title="${esc(r.pattern)}">${esc(r.pattern)}</span>`},{k:'action',l:'Action',txt:1},{k:'origin',l:'Origin',txt:1},
+   cN('hits','Hits'),cN('lines_removed','Lines removed'),cT('tokens_saved','Saved'),cT('teach_tokens','Teach cost'),{k:'net',l:'Net',n:1,v:r=>isN(r.net)?r.net:isN(r.tokens_saved)&&isN(r.teach_tokens)?r.tokens_saved-r.teach_tokens:null,f:r=>tk(isN(r.net)?r.net:isN(r.tokens_saved)&&isN(r.teach_tokens)?r.tokens_saved-r.teach_tokens:null)},cTime('last_hit_at','Last hit')],
+  detail:r=>`<div class="dg"><dl class="dl"><dt>Pattern</dt><dd class="mono">${esc(r.pattern)}</dd><dt>Scope</dt><dd class="mono">${esc(r.scope)}</dd><dt>When</dt><dd>${esc(r.when||'\u2014')}</dd><dt>Enabled</dt><dd>${r.enabled===false?'<span class="off">no</span>':r.enabled===true?'<span class="on">yes</span>':'\u2014'}</dd></dl>
+   <dl class="dl"><dt>Created</dt><dd>${fmtT(r.created_at)}</dd><dt>Last hit</dt><dd>${fmtT(r.last_hit_at)}</dd><dt>Findings</dt><dd>${A0(r.findings).length?A0(r.findings).map(esc).join('<br>'):'none'}</dd></dl></div>`})};
+const A0=x=>Array.isArray(x)?x:x==null?[]:[x];
+
+RENDER.settings=el=>{const S=D.settings,keys=Object.keys(S);
+ if(!keys.length){el.innerHTML='<h1>Settings</h1><div class="panel">'+empty('No settings were included in this report')+'</div>';return}
+ const isPath=k=>/(_path|_dir|_file|_files|path|dir)$/i.test(k);
+ const val=v=>v===true?'<span class="on">on</span>':v===false?'<span class="off">off</span>':v==null?NA:typeof v==='number'?(Number.isInteger(v)?fmtN(v):esc(v)):
+  Array.isArray(v)?(v.length?(v.every(x=>typeof x!=='object')?`<ul class="paths">${v.map(x=>`<li class="mono">${esc(x)}</li>`).join('')}</ul>`:`<code>${esc(JSON.stringify(v))}</code>`):'<span class="na">empty</span>'):
+  typeof v==='object'?`<code>${esc(JSON.stringify(v))}</code>`:`<span class="${/[\\/]/.test(v)?'mono':''}">${esc(v)}</span>`;
+ const flat=(o,p,out)=>{for(const k of Object.keys(o)){const v=o[k];if(v&&typeof v==='object'&&!Array.isArray(v)&&Object.keys(v).length)flat(v,p+k+'.',out);else out.push([p+k,v])}return out};
+ const gen=[],paths=[],groups=[];for(const k of keys){const v=S[k];if(v&&typeof v==='object'&&!Array.isArray(v))groups.push([k,flat(v,'',[])]);else(isPath(k)?paths:gen).push([k,v])}
+ const grp=(t,list)=>list.length?`<div class="panel"><div class="ph"><h2>${esc(t)}</h2></div><dl class="dl">${list.map(([k,v])=>`<dt class="mono">${esc(k)}</dt><dd>${val(v)}</dd>`).join('')}</dl></div>`:'';
+ el.innerHTML=`<h1>Settings</h1><p class="lead">Effective configuration at the time this report was generated.</p>
+ <div class="panel"><div class="ph"><h2>How to change</h2></div><div class="note"><ul><li>Show and edit settings with <code>ttk config</code>.</li><li>Per-project settings live in <code>.ttk/config.toml</code>; user-wide settings in the global ttk directory listed below.</li><li>Learned filters live in <code>.ttk/learned-filters.json</code> and are managed with <code>ttk rules</code> and <code>ttk learn</code>. Re-generate this page afterwards to see the change.</li></ul></div></div>
+ ${grp('General',gen)}${grp('Paths',paths)}${groups.map(([k,l])=>grp(k,l)).join('')}`};
+
+/* ---------- global wiring ---------- */
+const tip=$('#tip');let tipEl=null;
+document.addEventListener('mouseover',e=>{const t=e.target.closest&&e.target.closest('[data-tip]');if(t===tipEl)return;tipEl=t;if(!t){tip.style.display='none';return}tip.innerHTML=t.getAttribute('data-tip');tip.style.display='block'});
+document.addEventListener('mousemove',e=>{if(!tipEl)return;const r=tip.getBoundingClientRect();let x=e.clientX+14,y=e.clientY+14;if(x+r.width>innerWidth-8)x=e.clientX-r.width-14;if(y+r.height>innerHeight-8)y=e.clientY-r.height-14;tip.style.left=Math.max(4,x)+'px';tip.style.top=Math.max(4,y)+'px'});
+document.addEventListener('mouseleave',()=>{tipEl=null;tip.style.display='none'});
+$('#nav').addEventListener('click',e=>{const b=e.target.closest('button');if(b){go(b.dataset.s);window.scrollTo(0,0);if(b.dataset.s==='overview')drawCharts()}});
+window.addEventListener('hashchange',()=>{go(location.hash.slice(1));drawCharts()});
+window.addEventListener('resize',debounce(drawCharts,150));
+const th=$('#theme');const setTheme=t=>{document.documentElement.setAttribute('data-theme',t);th.textContent=t==='dark'?'\u2600 Light':'\u263E Dark';th.setAttribute('aria-pressed',String(t==='light'))};
+setTheme(document.documentElement.getAttribute('data-theme')||'dark');
+th.addEventListener('click',()=>{const t=document.documentElement.getAttribute('data-theme')==='dark'?'light':'dark';setTheme(t);try{localStorage.setItem('ttk-theme',t)}catch(e){}});
+/* debugging hook: window.ttkSample(sessions, filters) re-renders with a generated dataset of that size */
+window.ttkSample=(s,f)=>{const t0=performance.now();D=null;const d=makeSample(s||5000,f||1000);boot.call(null,d);SAMPLE=true;$('#banner').innerHTML='<div class="banner"><b>Sample data.</b> Generated stress dataset.</div>';return Math.round(performance.now()-t0)+' ms'};
+boot(DATA);
+</script>
+</body>
+</html>

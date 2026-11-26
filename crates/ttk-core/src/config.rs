@@ -122,6 +122,7 @@ pub struct Config {
     pub quality: QualityConfig,
     pub context: ContextConfig,
     pub learning: LearningConfig,
+    pub hooks: HooksConfig,
     pub security: SecurityConfig,
     pub telemetry: TelemetryConfig,
     pub limits: LimitsConfig,
@@ -236,6 +237,7 @@ impl Default for Config {
             quality: QualityConfig::default(),
             context: ContextConfig::default(),
             learning: LearningConfig::default(),
+            hooks: HooksConfig::default(),
             security: SecurityConfig::default(),
             telemetry: TelemetryConfig::default(),
             limits: LimitsConfig::default(),
@@ -275,6 +277,43 @@ impl Default for ContextConfig {
             minimum_output_reserve_tokens: 2048,
             deduplicate: true,
             delta_context: true,
+        }
+    }
+}
+
+/// How the agent hooks (`ttk hook`) behave.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct HooksConfig {
+    /// Compile tool output in the PostToolUse hook.
+    pub compile_output: bool,
+    /// Outputs estimated below this many tokens are passed through untouched:
+    /// compiling and pointing to a capsule would cost more than it saves.
+    pub min_tokens: u64,
+    /// Only replace the output when the compiled view is at least this much
+    /// smaller (0.0 - 1.0). A marginal saving is not worth a changed view.
+    pub min_saving: f64,
+    /// Inject the core rules at session start, after compaction and into
+    /// every subagent.
+    pub inject_context: bool,
+    /// Suggest teaching a filter when a large output was barely reduced.
+    pub hints: bool,
+    /// ...for outputs of at least this many tokens.
+    pub hint_min_tokens: u64,
+    /// Import measured provider usage from the transcript when a turn ends.
+    pub import_usage: bool,
+}
+
+impl Default for HooksConfig {
+    fn default() -> Self {
+        Self {
+            compile_output: true,
+            min_tokens: 200,
+            min_saving: 0.10,
+            inject_context: true,
+            hints: true,
+            hint_min_tokens: 1500,
+            import_usage: true,
         }
     }
 }

@@ -234,6 +234,60 @@ pub struct LearnArgs<'a> {
     pub dry_run: bool,
     pub force: bool,
     pub note: Option<&'a str>,
+    /// `success`, `failure` or `any` (default).
+    pub when: Option<&'a str>,
+}
+
+fn parse_when(s: Option<&str>) -> Result<ttk_learn::When> {
+    match s.map(|v| v.trim().to_ascii_lowercase()).as_deref() {
+        None | Some("any") | Some("") => Ok(ttk_learn::When::Any),
+        Some("success") | Some("ok") | Some("pass") => Ok(ttk_learn::When::Success),
+        Some("failure") | Some("fail") | Some("error") => Ok(ttk_learn::When::Failure),
+        Some(other) => Err(Error::other(format!(
+            "unknown --when `{other}` (expected any, success or failure)"
+        ))),
+    }
+}
+
+/// Stored outputs of this workspace, newest sessions first, as replay samples
+/// for validating and auditing rules.
+pub fn collect_samples(ws: &Workspace, sessions: usize) -> Vec<ttk_learn::Sample> {
+    let mut out = Vec::new();
+    let Ok(ids) = ws.events().sessions() else {
+        return out;
+    };
+    for session in ids.into_iter().take(sessions) {
+        let Ok(events) = ws.events().read_session(&session) else {
+            continue;
+        };
+        for event in events {
+            let Some(command) = event.metadata.get("command").and_then(|v| v.as_str()) else {
+                continue;
+            };
+            let Some(capsule) = &event.capsule_id else {
+                continue;
+            };
+            let Ok(text) = ws
+                .capsules()
+                .render(capsule.as_str(), ttk_store::LEVEL_RAW, true)
+            else {
+                continue;
+            };
+            let (program, sub) = split_command_line(command);
+            let exit = event
+                .metadata
+                .get("exit_code")
+                .and_then(|v| v.as_i64())
+                .map(|v| v as i32);
+            out.push(ttk_learn::Sample::new(
+                Some(&program),
+                sub.as_deref(),
+                exit,
+                text,
+            ));
+        }
+    }
+    out
 }
 
 pub fn learn(ctx: &Context, args: &LearnArgs<'_>) -> Result<i32> {
@@ -277,20 +331,58 @@ pub fn learn(ctx: &Context, args: &LearnArgs<'_>) -> Result<i32> {
         Target::Project
     };
     let path = target.path(&ws)?;
-    let mut set = RuleSet::load(&path)?;
+    let when = parse_when(args.when)?;
+    let samples = collect_samples(&ws, 20);
 
-    let mut lesson = Lesson::new(&annotated, scope.clone());
-    lesson.guards = guards_from(&config);
-    lesson.force = args.force;
-    lesson.note = args.note.map(str::to_string);
-    lesson.taught_from = source.as_ref().map(|s| s.capsule_ref.clone());
-    if let Some(src) = &source {
-        lesson.extra_keep = src.critical_lines.clone();
-    }
+    // Load, learn, validate and save under the rule file's lock, so two
+    // agents teaching at once cannot lose each other's rules.
+    let (set, outcome, validation, withdrawn) = ttk_learn::with_lock(&path, || {
+        let mut set = RuleSet::load(&path)?;
+        let mut lesson = Lesson::new(&annotated, scope.clone());
+        lesson.guards = guards_from(&config);
+        lesson.force = args.force;
+        lesson.note = args.note.map(str::to_string);
+        lesson.taught_from = source.as_ref().map(|s| s.capsule_ref.clone());
+        lesson.when = when;
+        if let Some(src) = &source {
+            lesson.extra_keep = src.critical_lines.clone();
+        }
+        let mut outcome = set.learn(&lesson);
 
-    let outcome = set.learn(&lesson);
-    if !args.dry_run && outcome.changed() {
-        set.save(&path)?;
+        // Replay the new rules over what this project actually printed
+        // before. A rule that would have eaten an error line is wrong, even
+        // though the runtime guard would have saved the line.
+        let created: Vec<&Rule> = outcome.created.iter().collect();
+        let validation = (!created.is_empty() && !samples.is_empty())
+            .then(|| ttk_learn::validate(&created, &samples, config.learning.protect_errors));
+        let mut withdrawn = Vec::new();
+        if let Some(v) = &validation
+            && !args.force
+        {
+            for r in &v.per_rule {
+                if r.critical > 0 {
+                    set.remove(&r.id);
+                    withdrawn.push(r.id.clone());
+                }
+            }
+            outcome.created.retain(|r| !withdrawn.contains(&r.id));
+        }
+        if !args.dry_run && (outcome.changed() || !withdrawn.is_empty()) {
+            ttk_learn::save_versioned(&set, &path, &format!("learn {scope}"))?;
+        }
+        Ok((set, outcome, validation, withdrawn))
+    })?;
+
+    // Teaching costs tokens: the lesson the agent wrote is booked as ttk's
+    // overhead, so a rule has to earn it back before it counts as a saving.
+    if !args.dry_run && !outcome.created.is_empty() {
+        crate::attribution::record_overhead(
+            &crate::attribution::Attribution::from_env("learn"),
+            &std::env::current_dir().unwrap_or_default(),
+            ttk_core::tokens::estimate(&text).value,
+            "lesson",
+            None,
+        );
     }
 
     if ctx.json {
@@ -318,6 +410,15 @@ pub fn learn(ctx: &Context, args: &LearnArgs<'_>) -> Result<i32> {
                 "line": r.line, "reason": r.reason.summary()
             })).collect::<Vec<_>>(),
             "rules_total": set.len(),
+            "when": when.as_str(),
+            "validation": validation.as_ref().map(|v| json!({
+                "samples": v.samples,
+                "lines_removed": v.lines_removed,
+                "tokens_saved": v.tokens_saved,
+                "critical_matches": v.critical_matches,
+                "verdict": format!("{:?}", v.verdict()),
+            })),
+            "withdrawn": withdrawn,
         }));
     }
 
@@ -433,6 +534,48 @@ pub fn learn(ctx: &Context, args: &LearnArgs<'_>) -> Result<i32> {
                 )
             )
         );
+    }
+
+    if let Some(v) = &validation {
+        outln!("{}", ui::heading("validated against history"));
+        outln!(
+            "{}",
+            ui::kv_note(
+                "replayed on",
+                format!("{} stored output(s)", v.samples),
+                "of this project"
+            )
+        );
+        outln!(
+            "{}",
+            ui::kv(
+                "would remove",
+                format!(
+                    "{} line(s), ~{} tokens",
+                    ui::thousands(v.lines_removed),
+                    ui::thousands(v.tokens_saved)
+                )
+            )
+        );
+        match v.verdict() {
+            ttk_learn::ValidationVerdict::Ok => {
+                outln!(
+                    "{}",
+                    ui::ok("no error, warning or result line would be touched")
+                )
+            }
+            ttk_learn::ValidationVerdict::Warn(w) => outln!("{}", ui::warn(w)),
+            ttk_learn::ValidationVerdict::Reject(r) => outln!("{}", ui::warn(r)),
+        }
+        for id in &withdrawn {
+            outln!(
+                "{}",
+                ui::warn(format!(
+                    "{id} withdrawn: it matched error-shaped lines in earlier runs \
+                     (pass --force only if you are sure)"
+                ))
+            );
+        }
     }
 
     if !outcome.rejected.is_empty() {
@@ -747,7 +890,7 @@ pub fn rules_set_enabled(ctx: &Context, id: &str, enabled: bool) -> Result<i32> 
     };
     let was = r.enabled;
     r.enabled = enabled;
-    set.save(&path)?;
+    ttk_learn::save_versioned(&set, &path, if enabled { "enable" } else { "disable" })?;
 
     if ctx.json {
         return ctx
@@ -775,7 +918,7 @@ pub fn rules_forget(ctx: &Context, id: &str) -> Result<i32> {
         let Ok(path) = target.path(&ws) else { continue };
         let mut set = RuleSet::load(&path)?;
         if set.remove(&full_id).is_some() {
-            set.save(&path)?;
+            ttk_learn::save_versioned(&set, &path, "forget")?;
             removed_from.push(target.origin().as_str());
         }
     }
@@ -817,7 +960,7 @@ pub fn rules_prune(ctx: &Context, unused_days: u64, dry_run: bool) -> Result<i32
         }
         let gone = set.prune(unused_days, now);
         if !gone.is_empty() && !dry_run {
-            set.save(&path)?;
+            ttk_learn::save_versioned(&set, &path, "prune")?;
         }
         dropped.extend(gone);
     }
@@ -874,7 +1017,7 @@ pub fn rules_import(ctx: &Context, file: Option<&str>, user: bool) -> Result<i32
     let mut set = RuleSet::load(&path)?;
     let before = set.len();
     let added = set.merge(incoming);
-    set.save(&path)?;
+    ttk_learn::save_versioned(&set, &path, "import")?;
 
     if ctx.json {
         return ctx.print_json(json!({
@@ -1168,6 +1311,263 @@ pub fn filter(
         }
     }
     Ok(0)
+}
+
+// ---------------------------------------------------------------------------
+// ttk rules history / restore / audit
+// ---------------------------------------------------------------------------
+
+/// Findings for every rule, project and global, against this workspace's
+/// stored outputs.
+pub fn audit_findings(layered: &Layered, now_millis: u64) -> Vec<ttk_learn::Finding> {
+    let samples = std::env::current_dir()
+        .ok()
+        .and_then(|cwd| {
+            let config = ttk_core::config::load(&cwd).ok()?.config;
+            Workspace::open(&cwd, &config).ok()
+        })
+        .map(|ws| collect_samples(&ws, 20))
+        .unwrap_or_default();
+    ttk_learn::audit(
+        &layered.merged,
+        &samples,
+        now_millis,
+        &ttk_learn::AuditOptions::default(),
+    )
+}
+
+/// One word for a rule's state, worst finding first.
+pub fn rule_status(rule: &Rule, findings: &[ttk_learn::Finding]) -> &'static str {
+    if !rule.enabled {
+        return "disabled";
+    }
+    let mine: Vec<&ttk_learn::Finding> = findings.iter().filter(|f| f.rule == rule.id).collect();
+    for (kind, word) in [
+        ("duplicate", "redundant"),
+        ("subsumed", "redundant"),
+        ("negative_net", "negative"),
+        ("overbroad", "overbroad"),
+        ("never_hit", "never_hit"),
+        ("stale", "stale"),
+    ] {
+        if mine.iter().any(|f| f.kind.as_str() == kind) {
+            return word;
+        }
+    }
+    "active"
+}
+
+pub fn rules_audit(ctx: &Context, fix: bool) -> Result<i32> {
+    let (_, ws) = ctx.workspace()?;
+    let layered = Layered::load(ws.root())?;
+    let now = ttk_core::ids::now_millis();
+    let findings = audit_findings(&layered, now);
+    let redundant = ttk_learn::redundant_ids(&findings);
+
+    let mut removed = Vec::new();
+    if fix && !redundant.is_empty() {
+        let mut files = vec![project_rules_path(ws.root())];
+        files.extend(ttk_learn::user_rule_files());
+        for path in files {
+            ttk_learn::with_lock(&path, || {
+                let mut set = RuleSet::load(&path)?;
+                let before = set.len();
+                for id in &redundant {
+                    if set.remove(id).is_some() {
+                        removed.push(id.clone());
+                    }
+                }
+                if set.len() != before {
+                    ttk_learn::save_versioned(&set, &path, "audit --fix")?;
+                }
+                Ok(())
+            })?;
+        }
+    }
+
+    if ctx.json {
+        return ctx.print_json(json!({
+            "rules": layered.len(),
+            "findings": findings.iter().map(|f| json!({
+                "rule": f.rule, "kind": f.kind.as_str(), "detail": f.detail,
+            })).collect::<Vec<_>>(),
+            "redundant": redundant,
+            "removed": removed,
+        }));
+    }
+
+    outln!(
+        "{}",
+        ui::banner(&format!(
+            "rule audit {} {} rule(s)",
+            ui::glyphs().bullet,
+            layered.len()
+        ))
+    );
+    if findings.is_empty() {
+        outln!(
+            "{}",
+            ui::ok("no duplicate, subsumed, stale, unused or negative rules")
+        );
+        return Ok(0);
+    }
+    let rows: Vec<Vec<String>> = findings
+        .iter()
+        .map(|f| {
+            vec![
+                ui::paint(ui::CODE, &f.rule),
+                ui::paint(
+                    if f.kind.is_redundant() {
+                        ui::WARN
+                    } else {
+                        ui::DIM
+                    },
+                    f.kind.as_str(),
+                ),
+                ui::ellipsize(&f.detail, 70),
+            ]
+        })
+        .collect();
+    out!(
+        "{}",
+        ui::table(
+            &["rule", "finding", "detail"],
+            &[Align::Left, Align::Left, Align::Left],
+            &rows
+        )
+    );
+    if !removed.is_empty() {
+        outln!(
+            "{}",
+            ui::ok(format!(
+                "{} redundant rule(s) removed — `ttk rules history` can bring them back",
+                removed.len()
+            ))
+        );
+    } else if !redundant.is_empty() {
+        outln!(
+            "{}",
+            ui::hint("remove the redundant ones with ", "ttk rules audit --fix")
+        );
+    }
+    Ok(0)
+}
+
+fn rule_files(ws: &Workspace) -> Vec<(Origin, PathBuf)> {
+    let mut files = vec![(Origin::Project, project_rules_path(ws.root()))];
+    files.extend(
+        ttk_learn::user_rule_files()
+            .into_iter()
+            .map(|p| (Origin::User, p)),
+    );
+    files
+}
+
+pub fn rules_history(ctx: &Context, limit: usize) -> Result<i32> {
+    let (_, ws) = ctx.workspace()?;
+    let mut all = Vec::new();
+    for (origin, path) in rule_files(&ws) {
+        for v in ttk_learn::versions(&path)? {
+            all.push((origin, path.clone(), v));
+        }
+    }
+    all.sort_by_key(|(_, _, v)| std::cmp::Reverse(v.at_millis));
+    if limit > 0 {
+        all.truncate(limit);
+    }
+    if ctx.json {
+        return ctx.print_json(json!(
+            all.iter()
+                .map(|(o, p, v)| json!({
+                    "id": v.id, "at_millis": v.at_millis, "reason": v.reason,
+                    "rules": v.rules, "origin": o.as_str(), "file": p.display().to_string(),
+                }))
+                .collect::<Vec<_>>()
+        ));
+    }
+    outln!("{}", ui::banner("rule file history"));
+    if all.is_empty() {
+        outln!(
+            "  {}",
+            ui::paint(
+                ui::DIM,
+                "no earlier versions yet — every change from now on is kept"
+            )
+        );
+        return Ok(0);
+    }
+    let offset = ui::local_offset_secs();
+    let rows: Vec<Vec<String>> = all
+        .iter()
+        .map(|(o, _, v)| {
+            vec![
+                ui::paint(ui::CODE, &v.id),
+                ui::iso_date(ttk_store::usage::day_number(v.at_millis, offset)),
+                o.as_str().to_string(),
+                v.rules.to_string(),
+                ui::ellipsize(&v.reason, 40),
+            ]
+        })
+        .collect();
+    out!(
+        "{}",
+        ui::table(
+            &["version", "date", "file", "rules", "replaced by"],
+            &[
+                Align::Left,
+                Align::Left,
+                Align::Left,
+                Align::Right,
+                Align::Left
+            ],
+            &rows
+        )
+    );
+    outln!(
+        "{}",
+        ui::hint("restore one with ", "ttk rules restore <version>")
+    );
+    Ok(0)
+}
+
+pub fn rules_restore(ctx: &Context, version: &str, user: bool) -> Result<i32> {
+    let (_, ws) = ctx.workspace()?;
+    let wanted = if user { Origin::User } else { Origin::Project };
+    // Prefer the file the flag names; fall back to whichever holds the id.
+    let mut files = rule_files(&ws);
+    files.sort_by_key(|(o, _)| *o != wanted);
+    for (origin, path) in files {
+        let has = ttk_learn::versions(&path)?
+            .iter()
+            .any(|v| v.id.starts_with(version));
+        if !has {
+            continue;
+        }
+        let restored = ttk_learn::with_lock(&path, || ttk_learn::restore(&path, version))?;
+        if ctx.json {
+            return ctx.print_json(json!({
+                "restored": restored.id, "rules": restored.rules,
+                "origin": origin.as_str(), "file": path.display().to_string(),
+            }));
+        }
+        outln!(
+            "{}",
+            ui::ok(format!(
+                "{} restored ({} rule(s)) into {}",
+                restored.id,
+                restored.rules,
+                path.display()
+            ))
+        );
+        outln!(
+            "{}",
+            ui::detail("the version it replaced was kept too — restoring is itself undoable")
+        );
+        return Ok(0);
+    }
+    Err(Error::other(format!(
+        "no rule file version matching `{version}` — see `ttk rules history`"
+    )))
 }
 
 #[cfg(test)]

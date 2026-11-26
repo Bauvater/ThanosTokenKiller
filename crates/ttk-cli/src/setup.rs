@@ -140,6 +140,21 @@ pub fn run(ctx: &Context, args: &SetupArgs) -> Result<i32> {
             let block = crate::guide::agent_block_for(target.agent, compact);
             let action = install::apply(&target, &block, false)?;
             written.push((target.path.clone(), action));
+            if target.agent == install::Agent::ClaudeCode {
+                let settings = crate::claude_hooks::settings_path_for(&target.path, target.global);
+                match crate::claude_hooks::install(
+                    &settings,
+                    &crate::claude_hooks::hook_command(),
+                    false,
+                ) {
+                    Ok(a) => outln!(
+                        "  {} {}",
+                        ui::paint(ui::OK, format!("{:<10}", a.as_str())),
+                        settings.display()
+                    ),
+                    Err(e) => errln!("{}", ui::warn(format!("hooks not installed: {e}"))),
+                }
+            }
             if let Some(dup) = install::remove_home_duplicate(&target, false)? {
                 written.push((dup, Action::DuplicateRemoved));
             }

@@ -8,3 +8,8 @@
 
 # Built installers (scripts/build-installer.ps1).
 /dist
+
+# Rule file history and locks are local, not shared.
+.ttk/rules-history/
+.ttk/*.lock
+.ttk/hints.json

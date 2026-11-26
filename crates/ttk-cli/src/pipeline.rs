@@ -199,7 +199,8 @@ pub fn process(
     {
         let program = input.command.and_then(CommandContext::program);
         let subcommand = input.command.and_then(CommandContext::subcommand);
-        let engine = Engine::for_command(rules, program.as_deref(), subcommand)
+        let exit_code = input.command.and_then(|c| c.exit_code);
+        let engine = Engine::for_context(rules, program.as_deref(), subcommand, exit_code)
             .protect_errors(config.learning.protect_errors);
         if !engine.is_empty() {
             let pass = engine.filter(&working);

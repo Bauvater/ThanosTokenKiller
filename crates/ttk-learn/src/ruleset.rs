@@ -18,7 +18,7 @@ use ttk_core::{Error, Result};
 
 use crate::annotate::Annotated;
 use crate::pattern::{MAX_BLOCK_LINES, Pattern, Template};
-use crate::rule::{Action, Guards, Rejection, Rule, Scope, rule_id_for};
+use crate::rule::{Action, Guards, Rejection, Rule, Scope, When, rule_id_when};
 
 /// Bumped whenever the on-disk shape changes incompatibly.
 pub const RULES_SCHEMA_VERSION: u32 = 1;
@@ -114,6 +114,9 @@ pub struct Lesson<'a> {
     pub force: bool,
     pub note: Option<String>,
     pub taught_from: Option<String>,
+    /// Restrict the rules this lesson creates to successful or failed runs.
+    /// `Any` (the default) creates rules with exactly the ids they always had.
+    pub when: When,
 }
 
 impl<'a> Lesson<'a> {
@@ -126,7 +129,27 @@ impl<'a> Lesson<'a> {
             force: false,
             note: None,
             taught_from: None,
+            when: When::Any,
         }
+    }
+
+    /// What this lesson cost to write, in estimated tokens.
+    ///
+    /// The parsed document's own size when it is known; otherwise the sum of
+    /// the lines it carries, which undercounts only the tags.
+    pub fn teach_tokens(&self) -> u64 {
+        let a = self.annotated;
+        if a.text_tokens > 0 {
+            return a.text_tokens;
+        }
+        let lines = a
+            .trash
+            .iter()
+            // `keep` already holds the `<filter-only>` and `<filter-keep>` lines.
+            .chain(&a.keep)
+            .chain(a.folds.iter().flat_map(|f| &f.lines))
+            .map(String::as_str);
+        ttk_core::tokens::estimate_all(lines).value
     }
 }
 
@@ -199,6 +222,20 @@ impl RuleSet {
         self.rules
             .iter()
             .filter(|r| r.enabled && r.scope.applies_to(program, subcommand))
+            .collect()
+    }
+
+    /// Rules that fire for this command *and* this exit code. `None` means the
+    /// exit code is unknown, which admits only unconditioned rules.
+    pub fn applicable_in(
+        &self,
+        program: Option<&str>,
+        subcommand: Option<&str>,
+        exit_code: Option<i32>,
+    ) -> Vec<&Rule> {
+        self.rules
+            .iter()
+            .filter(|r| r.enabled && r.applies(program, subcommand, exit_code))
             .collect()
     }
 
@@ -379,7 +416,30 @@ impl RuleSet {
             .map(|(line, reason)| RejectedLine { line, reason })
             .collect();
 
+        self.charge_teaching(lesson, &mut outcome);
         outcome
+    }
+
+    /// Spread what the lesson cost over the rules it created, evenly, with the
+    /// remainder on the first, so the shares always add up to the whole.
+    ///
+    /// A lesson that only reinforced existing rules creates nothing to charge:
+    /// its cost is not attributed to any rule.
+    fn charge_teaching(&mut self, lesson: &Lesson<'_>, outcome: &mut LearnOutcome) {
+        let n = outcome.created.len() as u64;
+        if n == 0 {
+            return;
+        }
+        let total = lesson.teach_tokens();
+        let share = total / n;
+        let remainder = total % n;
+        for (i, created) in outcome.created.iter_mut().enumerate() {
+            let cost = if i == 0 { share + remainder } else { share };
+            created.teach_tokens = cost;
+            if let Some(stored) = self.get_mut(&created.id) {
+                stored.teach_tokens = cost;
+            }
+        }
     }
 
     /// Create the rule, or reinforce the one that already has this id.
@@ -410,7 +470,7 @@ impl RuleSet {
         source_line: &str,
         outcome: &mut LearnOutcome,
     ) {
-        let id = rule_id_for(&lesson.scope, &pattern, &action);
+        let id = rule_id_when(&lesson.scope, &pattern, &action, lesson.when);
         if let Some(existing) = self.get_mut(&id) {
             existing.examples = existing.examples.saturating_add(examples);
             // Teaching a disabled rule again is an explicit request for it.
@@ -418,7 +478,9 @@ impl RuleSet {
             outcome.reinforced.push(id);
             return;
         }
-        let mut rule = Rule::with_action(lesson.scope.clone(), pattern, action);
+        let mut rule =
+            Rule::with_action(lesson.scope.clone(), pattern, action).with_when(lesson.when);
+        debug_assert_eq!(rule.id, id);
         rule.examples = examples;
         rule.note = lesson.note.clone();
         rule.taught_from = lesson.taught_from.clone();
@@ -441,6 +503,10 @@ impl RuleSet {
                         lesson.scope.program.as_deref(),
                         lesson.scope.subcommand.as_deref(),
                     )
+                    // Covered means covered in every context the lesson is
+                    // about: a success-only rule does not cover a line taught
+                    // for every run.
+                    && r.when.contains(lesson.when)
             })
             .collect();
         let protect = lesson.guards.protect_errors && !lesson.force;
@@ -748,15 +814,24 @@ impl RuleSet {
         serde_json::to_string_pretty(self).expect("a rule set is serializable")
     }
 
+    /// Exactly the bytes [`RuleSet::save`] writes.
+    pub fn file_text(&self) -> String {
+        let mut text = self.to_json();
+        text.push('\n');
+        text
+    }
+
     /// Write atomically: a crash mid-write must not cost the whole file.
+    ///
+    /// Keeps no history; see [`crate::history::save_versioned`] for a save
+    /// that can be undone. Accounting-only writes belong here, so they do not
+    /// churn through the version history.
     pub fn save(&self, path: &Path) -> Result<()> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
         let tmp = path.with_extension("json.tmp");
-        let mut text = self.to_json();
-        text.push('\n');
-        std::fs::write(&tmp, text)?;
+        std::fs::write(&tmp, self.file_text())?;
         std::fs::rename(&tmp, path)?;
         Ok(())
     }
@@ -1211,6 +1286,111 @@ real output starts here
         assert_eq!(dropped.len(), 1);
         assert_eq!(set.len(), 1);
         assert!(set.rules[0].hits > 0);
+    }
+
+    // -- conditions and teaching cost ---------------------------------------
+
+    const WARN: &str = "<filter-trash>\nnpm WARN deprecated pkg@1.0.6 unsupported\n</filter-trash>";
+
+    #[test]
+    fn a_conditioned_lesson_creates_a_distinct_rule() {
+        let a = annotate::parse(WARN);
+        let mut set = RuleSet::default();
+        set.learn(&Lesson::new(&a, Scope::program("npm")));
+        let any_id = set.rules[0].id.clone();
+
+        let mut ok = Lesson::new(&a, Scope::program("npm"));
+        ok.when = When::Success;
+        // The `any` rule already covers every success run.
+        let out = set.learn(&ok);
+        assert!(out.created.is_empty());
+        assert_eq!(out.already_covered, 1);
+
+        // The other way round: a success rule does not cover an `any` lesson.
+        let mut fresh = RuleSet::default();
+        let first = fresh.learn(&ok);
+        assert_eq!(first.created.len(), 1);
+        assert_eq!(fresh.rules[0].when, When::Success);
+        assert_ne!(fresh.rules[0].id, any_id);
+        let second = fresh.learn(&Lesson::new(&a, Scope::program("npm")));
+        assert_eq!(second.already_covered, 0);
+        assert_eq!(second.created.len(), 1);
+        assert_eq!(fresh.rules[1].id, any_id, "an `any` rule keeps its old id");
+        assert_eq!(fresh.len(), 2);
+
+        // Teaching the success lesson again reinforces the success rule.
+        let again = fresh.learn(&ok);
+        assert!(again.created.is_empty());
+    }
+
+    #[test]
+    fn applicability_honours_the_exit_code() {
+        let a = annotate::parse(WARN);
+        let mut set = RuleSet::default();
+        let mut ok = Lesson::new(&a, Scope::program("npm"));
+        ok.when = When::Success;
+        set.learn(&ok);
+        assert_eq!(set.applicable_in(Some("npm"), None, Some(0)).len(), 1);
+        assert!(set.applicable_in(Some("npm"), None, Some(1)).is_empty());
+        assert!(set.applicable_in(Some("npm"), None, None).is_empty());
+        // The scope-only query is unchanged.
+        assert_eq!(set.applicable(Some("npm"), None).len(), 1);
+    }
+
+    #[test]
+    fn teaching_cost_is_shared_between_the_rules_a_lesson_created() {
+        let text = "<filter-trash>\n\
+                    npm WARN deprecated pkg@1.0.6 unsupported\n\
+                    yarn info fetching package metadata now\n\
+                    pip notice a new release is available\n\
+                    </filter-trash>\n";
+        let a = annotate::parse(text);
+        let total = ttk_core::tokens::estimate(text).value;
+        assert_eq!(a.text_tokens, total);
+        let mut set = RuleSet::default();
+        let out = set.learn(&Lesson::new(&a, Scope::global()));
+        assert_eq!(out.created.len(), 3);
+        let shares: Vec<u64> = out.created.iter().map(|r| r.teach_tokens).collect();
+        assert_eq!(shares.iter().sum::<u64>(), total);
+        assert_eq!(shares[1], total / 3);
+        assert_eq!(shares[0], total / 3 + total % 3);
+        // The stored rules carry the same numbers as the reported ones.
+        for r in &out.created {
+            assert_eq!(set.get(&r.id).expect("stored").teach_tokens, r.teach_tokens);
+            assert!(r.net_tokens() < 0, "nothing saved yet");
+        }
+
+        // Reinforcing creates nothing and charges nothing.
+        let before: u64 = set.rules.iter().map(|r| r.teach_tokens).sum();
+        set.learn(&Lesson::new(&a, Scope::global()));
+        let after: u64 = set.rules.iter().map(|r| r.teach_tokens).sum();
+        assert_eq!(before, after);
+    }
+
+    #[test]
+    fn a_hand_built_annotation_still_has_a_teaching_cost() {
+        let mut a = annotate::parse(WARN);
+        a.text_tokens = 0;
+        let lesson = Lesson::new(&a, Scope::global());
+        assert!(lesson.teach_tokens() > 0);
+    }
+
+    #[test]
+    fn a_rule_file_without_the_new_fields_loads() {
+        // A rule written by this version, with every field that did not exist
+        // before removed: exactly the shape an older ttk wrote.
+        let a = annotate::parse(WARN);
+        let mut s = RuleSet::default();
+        s.learn(&Lesson::new(&a, Scope::program("npm")));
+        let mut v: serde_json::Value = serde_json::from_str(&s.to_json()).expect("json");
+        let rule = v["rules"][0].as_object_mut().expect("rule");
+        assert!(rule.contains_key("teach_tokens"), "a fresh rule has a cost");
+        assert!(!rule.contains_key("when"), "`any` is never written");
+        rule.remove("teach_tokens");
+        let set = RuleSet::from_json(&v.to_string()).expect("old shape loads");
+        assert_eq!(set.rules[0].when, When::Any);
+        assert_eq!(set.rules[0].teach_tokens, 0);
+        assert_eq!(set.rules[0].id, s.rules[0].id);
     }
 
     #[test]

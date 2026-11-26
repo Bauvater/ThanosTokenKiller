@@ -92,6 +92,96 @@ impl Scope {
             subcommand,
         }
     }
+
+    /// Does every command this scope `other` applies to also fall under
+    /// `self`? Scopes nest (global ⊇ program ⊇ program + subcommand), so this
+    /// is the "equal or wider" test.
+    pub fn contains(&self, other: &Scope) -> bool {
+        fn covers(want: &Option<String>, got: &Option<String>) -> bool {
+            match (want, got) {
+                (None, _) => true,
+                (Some(_), None) => false,
+                (Some(w), Some(g)) => w.eq_ignore_ascii_case(g),
+            }
+        }
+        covers(&self.program, &other.program) && covers(&self.subcommand, &other.subcommand)
+    }
+
+    /// Could some command fall under both scopes?
+    pub fn overlaps(&self, other: &Scope) -> bool {
+        self.contains(other) || other.contains(self)
+    }
+}
+
+/// When a rule may fire, judged by the exit code of the command whose output
+/// is being filtered.
+///
+/// A progress bar is noise when a build succeeds and may be the only context
+/// when it fails; `Success` lets a lesson say exactly that. An unknown exit
+/// code (a `ttk compile` pipe) admits only `Any` rules: a conditioned rule has
+/// no evidence it is safe when the condition cannot be checked.
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum When {
+    /// Always.
+    #[default]
+    Any,
+    /// Only when the exit code is known and zero.
+    Success,
+    /// Only when the exit code is known and non-zero.
+    Failure,
+}
+
+impl When {
+    pub fn is_any(&self) -> bool {
+        matches!(self, When::Any)
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            When::Any => "any",
+            When::Success => "success",
+            When::Failure => "failure",
+        }
+    }
+
+    /// Parse `any` / `success` / `ok` / `failure` / `fail` / `error`.
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "" | "any" | "always" => Some(When::Any),
+            "success" | "ok" | "pass" | "passed" => Some(When::Success),
+            "failure" | "fail" | "failed" | "error" => Some(When::Failure),
+            _ => None,
+        }
+    }
+
+    /// May a rule with this condition fire for a command that exited with
+    /// `exit_code`? `None` means the exit code is unknown.
+    pub fn admits(self, exit_code: Option<i32>) -> bool {
+        match self {
+            When::Any => true,
+            When::Success => exit_code == Some(0),
+            When::Failure => matches!(exit_code, Some(c) if c != 0),
+        }
+    }
+
+    /// Does `self` fire in every context `other` fires in?
+    pub fn contains(self, other: When) -> bool {
+        self == When::Any || self == other
+    }
+
+    /// Is there a context in which both fire?
+    pub fn overlaps(self, other: When) -> bool {
+        self.contains(other) || other.contains(self)
+    }
+}
+
+impl fmt::Display for When {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
 }
 
 impl fmt::Display for Scope {
@@ -205,6 +295,16 @@ pub struct Rule {
     /// Learned despite matching an error-shaped line, via `--force`.
     #[serde(default)]
     pub forced: bool,
+    /// Only fire on success, only on failure, or always. Omitted from the file
+    /// when it is `any`, so rule files written before conditions existed are
+    /// byte-for-byte what they were.
+    #[serde(default, skip_serializing_if = "When::is_any")]
+    pub when: When,
+    /// Estimated tokens the lesson that created this rule cost to write,
+    /// shared evenly between the rules it produced. What the rule has to save
+    /// before it has paid for itself; see [`Rule::net_tokens`].
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub teach_tokens: u64,
 
     // -- accounting, updated by the engine --------------------------------
     #[serde(default)]
@@ -219,6 +319,10 @@ pub struct Rule {
 
 fn yes() -> bool {
     true
+}
+
+fn is_zero(n: &u64) -> bool {
+    *n == 0
 }
 
 impl Rule {
@@ -240,6 +344,8 @@ impl Rule {
             note: None,
             taught_from: None,
             forced: false,
+            when: When::Any,
+            teach_tokens: 0,
             hits: 0,
             lines_removed: 0,
             tokens_saved: 0,
@@ -247,12 +353,42 @@ impl Rule {
         }
     }
 
+    /// The same rule, restricted to `when`. The id is recomputed, because a
+    /// conditioned rule is a different instruction from the unconditioned one.
+    pub fn with_when(mut self, when: When) -> Self {
+        self.when = when;
+        self.id = rule_id_when(&self.scope, &self.template, &self.action, when);
+        self
+    }
+
+    /// Tokens saved minus the tokens it cost to teach. Negative means the
+    /// rule has not yet earned back its lesson.
+    pub fn net_tokens(&self) -> i64 {
+        let saved = i64::try_from(self.tokens_saved).unwrap_or(i64::MAX);
+        let cost = i64::try_from(self.teach_tokens).unwrap_or(i64::MAX);
+        saved.saturating_sub(cost)
+    }
+
+    /// May this rule fire for output of this command and exit code?
+    pub fn applies(
+        &self,
+        program: Option<&str>,
+        subcommand: Option<&str>,
+        exit_code: Option<i32>,
+    ) -> bool {
+        self.scope.applies_to(program, subcommand) && self.when.admits(exit_code)
+    }
+
     /// Carry the accounting of `other` into `self` when two rules merge.
+    ///
+    /// Teaching cost is summed like the savings are: both lessons were paid
+    /// for, and the merged rule has to earn back both.
     pub fn absorb(&mut self, other: &Rule) {
         self.examples = self.examples.saturating_add(other.examples);
         self.hits += other.hits;
         self.lines_removed += other.lines_removed;
         self.tokens_saved += other.tokens_saved;
+        self.teach_tokens = self.teach_tokens.saturating_add(other.teach_tokens);
         self.created_millis = self.created_millis.min(other.created_millis);
         self.last_hit_millis = match (self.last_hit_millis, other.last_hit_millis) {
             (Some(a), Some(b)) => Some(a.max(b)),
@@ -308,6 +444,12 @@ pub fn rule_id(scope: &Scope, template: &Pattern) -> String {
 /// different instructions about the same text, and teaching one must not
 /// silently overwrite the other.
 pub fn rule_id_for(scope: &Scope, template: &Pattern, action: &Action) -> String {
+    rule_id_when(scope, template, action, When::Any)
+}
+
+/// The full identity: scope, pattern, action and condition. An unconditioned
+/// rule hashes exactly as it did before conditions existed.
+pub fn rule_id_when(scope: &Scope, template: &Pattern, action: &Action, when: When) -> String {
     let mut key = format!("{scope}\u{1}{}", template.canonical());
     match action {
         // The original shape, so every id learned before actions existed stays
@@ -315,6 +457,9 @@ pub fn rule_id_for(scope: &Scope, template: &Pattern, action: &Action) -> String
         Action::Drop => {}
         Action::Fold { summary } => key.push_str(&format!("\u{1}fold\u{1}{summary}")),
         Action::Keep => key.push_str("\u{1}keep"),
+    }
+    if !when.is_any() {
+        key.push_str(&format!("\u{1}when\u{1}{}", when.as_str()));
     }
     let hex = blake3::hash(key.as_bytes()).to_hex();
     let short = &hex[..10];
@@ -612,6 +757,94 @@ mod tests {
         );
         assert_eq!(Action::Drop.folded_line(40), None);
         assert_eq!(Action::Keep.folded_line(40), None);
+    }
+
+    /// Pinned values computed before `when` existed: an id that changes is a
+    /// rule file that silently stops merging with every copy of itself.
+    #[test]
+    fn existing_rule_ids_never_change() {
+        let t = pat("npm WARN deprecated glob@7.2.3 is not supported");
+        assert_eq!(rule_id(&Scope::program("npm"), &t), "flt_d495049169");
+        let fold = Action::Fold {
+            summary: "npm noise".into(),
+        };
+        let scope = Scope::command("npm", "install");
+        assert_eq!(rule_id_for(&scope, &t, &fold), "flt_cdb199435a");
+        assert_eq!(rule_id_when(&scope, &t, &fold, When::Any), "flt_cdb199435a");
+        let plain = Rule::new(Scope::program("npm"), t);
+        assert_eq!(plain.id, "flt_d495049169");
+        assert_eq!(plain.clone().with_when(When::Any).id, plain.id);
+    }
+
+    #[test]
+    fn a_condition_is_part_of_a_rules_identity() {
+        let t = pat("npm WARN deprecated glob@7.2.3 is not supported");
+        let any = Rule::new(Scope::program("npm"), t);
+        let ok = any.clone().with_when(When::Success);
+        let fail = any.clone().with_when(When::Failure);
+        assert_ne!(any.id, ok.id);
+        assert_ne!(any.id, fail.id);
+        assert_ne!(ok.id, fail.id);
+        assert_eq!(ok.when, When::Success);
+    }
+
+    #[test]
+    fn conditions_admit_exit_codes_conservatively() {
+        assert!(When::Any.admits(None));
+        assert!(When::Any.admits(Some(3)));
+        assert!(When::Success.admits(Some(0)));
+        assert!(!When::Success.admits(Some(1)));
+        assert!(!When::Success.admits(None), "unknown is not success");
+        assert!(When::Failure.admits(Some(2)));
+        assert!(!When::Failure.admits(Some(0)));
+        assert!(!When::Failure.admits(None), "unknown is not failure");
+        assert!(When::Any.contains(When::Success));
+        assert!(!When::Success.contains(When::Any));
+        assert!(!When::Success.overlaps(When::Failure));
+        assert_eq!(When::parse("ok"), Some(When::Success));
+        assert_eq!(When::parse("FAIL"), Some(When::Failure));
+        assert_eq!(When::parse("sometimes"), None);
+    }
+
+    #[test]
+    fn scopes_nest() {
+        let g = Scope::global();
+        let p = Scope::program("npm");
+        let c = Scope::command("npm", "install");
+        assert!(g.contains(&p) && g.contains(&c) && p.contains(&c));
+        assert!(!c.contains(&p) && !p.contains(&g));
+        assert!(c.contains(&c));
+        assert!(!c.overlaps(&Scope::command("npm", "test")));
+        assert!(!p.overlaps(&Scope::program("yarn")));
+        assert!(c.overlaps(&g));
+    }
+
+    #[test]
+    fn net_tokens_subtract_the_teaching_cost() {
+        let mut r = Rule::new(Scope::global(), pat("npm WARN deprecated glob@7.2.3"));
+        r.teach_tokens = 50;
+        r.tokens_saved = 20;
+        assert_eq!(r.net_tokens(), -30);
+        r.tokens_saved = 80;
+        assert_eq!(r.net_tokens(), 30);
+    }
+
+    #[test]
+    fn a_rule_file_from_before_conditions_still_loads() {
+        let r = Rule::new(Scope::program("npm"), pat("npm WARN deprecated glob@7.2.3"));
+        let mut v = serde_json::to_value(&r).expect("json");
+        assert!(v.get("when").is_none(), "`any` is not written");
+        assert!(v.get("teach_tokens").is_none(), "zero is not written");
+        v.as_object_mut().expect("object").remove("when");
+        let back: Rule = serde_json::from_value(v).expect("old shape loads");
+        assert_eq!(back.when, When::Any);
+        assert_eq!(back.teach_tokens, 0);
+
+        let ok = r.with_when(When::Success);
+        let text = serde_json::to_string(&ok).expect("json");
+        assert!(text.contains("\"when\":\"success\""), "{text}");
+        let back: Rule = serde_json::from_str(&text).expect("load");
+        assert_eq!(back.when, When::Success);
     }
 
     #[test]

@@ -189,7 +189,8 @@ pub fn has_block(path: &Path) -> bool {
 /// Was the block in this file written with `--compact`? Updates keep the form
 /// the user chose.
 pub fn has_compact_block(path: &Path) -> bool {
-    std::fs::read_to_string(path).is_ok_and(|t| t.contains("**Teach the filter.**"))
+    std::fs::read_to_string(path)
+        .is_ok_and(|t| t.contains("**Teach the filter.**") || t.contains("(next to this file)"))
 }
 
 /// Take the ttk block out of a file, leaving everything else. `true` when
@@ -452,11 +453,38 @@ pub fn apply(target: &Target, block: &str, dry_run: bool) -> Result<Action> {
         Action::BlockAdded
     };
 
-    if dry_run || action == Action::Unchanged {
+    if dry_run {
+        return Ok(action);
+    }
+    // The block points at the rule file beside it, so the rule file is part
+    // of the install: written (or refreshed) whenever the block is.
+    write_rule_file(target)?;
+    if action == Action::Unchanged {
         return Ok(action);
     }
     write_atomically(&target.path, &updated)?;
     Ok(action)
+}
+
+/// `ttk.md` beside an instruction file.
+pub fn rule_file_path(target: &Target) -> PathBuf {
+    target
+        .path
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_default()
+        .join(crate::guide::TTK_MD_FILE)
+}
+
+/// Write `ttk.md` next to the target if it is missing or outdated.
+pub fn write_rule_file(target: &Target) -> Result<bool> {
+    let path = rule_file_path(target);
+    let want = crate::guide::TTK_MD;
+    if std::fs::read_to_string(&path).is_ok_and(|have| have.replace("\r\n", "\n") == want) {
+        return Ok(false);
+    }
+    write_atomically(&path, want)?;
+    Ok(true)
 }
 
 // ---------------------------------------------------------------------------

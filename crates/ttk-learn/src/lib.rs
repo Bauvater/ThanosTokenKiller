@@ -41,19 +41,25 @@
 //! See `docs/learned-filters.md` for the whole design.
 
 pub mod annotate;
+pub mod audit;
 pub mod engine;
+pub mod history;
 pub mod pattern;
 pub mod rule;
 pub mod ruleset;
+pub mod validate;
 
 pub use annotate::{Annotated, FoldGroup};
+pub use audit::{AuditOptions, Finding, FindingKind, Sample, audit, redundant_ids};
 pub use engine::{Engine, Filtered, RuleHit, record};
+pub use history::{Version, restore, save_versioned, versions, with_lock};
 pub use pattern::{Class, Template};
-pub use rule::{Action, Guards, Rejection, Rule, Scope};
+pub use rule::{Action, Guards, Rejection, Rule, Scope, When};
 pub use ruleset::{
     LearnOutcome, Lesson, Origin, RULES_FILE, RejectedLine, RuleSet, project_rules_path,
     user_rule_files, user_rules_path,
 };
+pub use validate::{RuleValidation, Validation, ValidationVerdict, validate};
 
 use std::path::Path;
 

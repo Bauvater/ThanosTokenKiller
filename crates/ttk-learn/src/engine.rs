@@ -159,8 +159,23 @@ impl<'a> Engine<'a> {
     /// command we ran (a `ttk compile` pipe). Only global rules apply then:
     /// a rule taught for `npm install` has no evidence that it is safe for
     /// text of unknown origin.
+    ///
+    /// The exit code is treated as unknown, so only unconditioned rules apply;
+    /// use [`Engine::for_context`] when it is known.
     pub fn for_command(set: &'a RuleSet, program: Option<&str>, subcommand: Option<&str>) -> Self {
-        let applicable = set.applicable(program, subcommand);
+        Self::for_context(set, program, subcommand, None)
+    }
+
+    /// Select the rules whose scope covers this command and whose condition
+    /// ([`crate::rule::When`]) admits this exit code. `exit_code: None` means
+    /// unknown, and admits only `any` rules.
+    pub fn for_context(
+        set: &'a RuleSet,
+        program: Option<&str>,
+        subcommand: Option<&str>,
+        exit_code: Option<i32>,
+    ) -> Self {
+        let applicable = set.applicable_in(program, subcommand, exit_code);
         let (keep, active): (Vec<&Rule>, Vec<&Rule>) =
             applicable.into_iter().partition(|r| r.is_keep());
         Self {
@@ -369,6 +384,24 @@ pub fn covered_lines(rules: &[&Rule], lines: &[&str], protect_errors: bool) -> V
     let active: Vec<&Rule> = rules.iter().filter(|r| !r.is_keep()).copied().collect();
     let ordered = ordered(&active);
     cover(&ordered, lines, protect_errors)
+        .by_line
+        .into_iter()
+        .map(|slot| slot.is_some())
+        .collect()
+}
+
+/// Which of `lines` this one rule matches on its own, ignoring every other
+/// rule and the error guard.
+///
+/// The solo view that the audit and validation need: "what would this rule
+/// claim if it were the only one?" — not who wins when several compete. Uses
+/// the same matching pass as [`Engine::filter`], so blocks match only as whole
+/// runs here too. A disabled rule is matched as if it were enabled. Blank
+/// lines inside a matched block are reported as matched, like the filter does.
+pub(crate) fn solo_matches(rule: &Rule, lines: &[&str]) -> Vec<bool> {
+    let mut live = rule.clone();
+    live.enabled = true;
+    cover(&[&live], lines, false)
         .by_line
         .into_iter()
         .map(|slot| slot.is_some())
@@ -880,6 +913,72 @@ from another command
                 .text,
             text
         );
+    }
+
+    // -- conditions -----------------------------------------------------------
+
+    fn conditioned(when: crate::rule::When) -> RuleSet {
+        let a = annotate::parse(&format!("<filter-trash>\n{NOISE}\n</filter-trash>\n"));
+        let mut set = RuleSet::default();
+        let mut lesson = Lesson::new(&a, Scope::program("npm"));
+        lesson.when = when;
+        set.learn(&lesson);
+        assert_eq!(set.len(), 1);
+        set
+    }
+
+    #[test]
+    fn a_success_rule_fires_only_on_a_known_success() {
+        use crate::rule::When;
+        let set = conditioned(When::Success);
+        let text = format!("{NOISE}\nadded 1 package\n");
+        let on = |exit| {
+            Engine::for_context(&set, Some("npm"), None, exit)
+                .filter(&text)
+                .removed_lines
+        };
+        assert_eq!(on(Some(0)), 1);
+        assert_eq!(on(Some(1)), 0);
+        assert_eq!(on(None), 0, "unknown exit code: conservative");
+        assert!(Engine::for_command(&set, Some("npm"), None).is_empty());
+    }
+
+    #[test]
+    fn a_failure_rule_fires_only_on_a_known_failure() {
+        use crate::rule::When;
+        let set = conditioned(When::Failure);
+        let text = format!("{NOISE}\n");
+        let on = |exit| {
+            Engine::for_context(&set, Some("npm"), None, exit)
+                .filter(&text)
+                .removed_lines
+        };
+        assert_eq!(on(Some(2)), 1);
+        assert_eq!(on(Some(0)), 0);
+        assert_eq!(on(None), 0);
+    }
+
+    #[test]
+    fn an_unconditioned_rule_fires_whatever_the_exit_code() {
+        let set = taught(&[NOISE], Scope::program("npm"));
+        let text = format!("{NOISE}\n");
+        for exit in [None, Some(0), Some(1)] {
+            let out = Engine::for_context(&set, Some("npm"), None, exit).filter(&text);
+            assert_eq!(out.removed_lines, 1, "{exit:?}");
+        }
+    }
+
+    #[test]
+    fn solo_matches_ignore_competition_and_the_guard() {
+        let set = taught(&BANNER, Scope::global());
+        let line = set.rules.iter().find(|r| !r.is_block()).expect("line rule");
+        let block = block_rule(&set);
+        let text = format!("{}\ntail\n", BANNER.join("\n"));
+        let lines: Vec<&str> = text.lines().collect();
+        // In the filter the block wins the title line; alone, the line rule
+        // still claims it.
+        assert_eq!(solo_matches(line, &lines), vec![false, true, false, false]);
+        assert_eq!(solo_matches(block, &lines), vec![true, true, true, false]);
     }
 
     #[test]
