@@ -74,23 +74,46 @@ fn guards_from(config: &Config) -> Guards {
 /// `"npm install --save"` → `("npm", Some("install"))`, path and `.exe`
 /// stripped. Mirrors `CommandContext::program`/`subcommand` for a command line
 /// that has already been flattened into a string on an event.
-fn split_command_line(line: &str) -> (String, Option<String>) {
-    let (first, rest) = match line.strip_prefix('"') {
-        Some(r) => match r.split_once('"') {
-            Some((prog, rest)) => (prog, rest),
-            None => (r, ""),
-        },
-        None => match line.split_once(char::is_whitespace) {
-            Some((prog, rest)) => (prog, rest),
-            None => (line, ""),
-        },
-    };
-    let program = ttk_learn::rule::normalise(first);
-    let subcommand = rest
-        .split_whitespace()
-        .find(|a| !a.starts_with('-'))
-        .map(str::to_string);
+pub(crate) fn split_command_line(line: &str) -> (String, Option<String>) {
+    let words = split_quoted(line);
+    let program = ttk_learn::rule::normalise(words.first().map_or("", String::as_str));
+    let subcommand = words.into_iter().skip(1).find(|a| !a.starts_with('-'));
     (program, subcommand)
+}
+
+/// Undo `CommandContext::command_line`: words separated by whitespace, a
+/// word containing spaces wrapped in double quotes.
+///
+/// Splitting on whitespace alone turned `sh -c "cat out.txt"` into the
+/// subcommand `"cat`, while the running command reports `cat out.txt` — so a
+/// rule learned from that run never matched the next one.
+pub(crate) fn split_quoted(line: &str) -> Vec<String> {
+    let mut words = Vec::new();
+    let mut cur = String::new();
+    let mut in_quotes = false;
+    let mut has_word = false;
+    for ch in line.chars() {
+        match ch {
+            '"' => {
+                in_quotes = !in_quotes;
+                has_word = true;
+            }
+            c if c.is_whitespace() && !in_quotes => {
+                if has_word {
+                    words.push(std::mem::take(&mut cur));
+                    has_word = false;
+                }
+            }
+            c => {
+                cur.push(c);
+                has_word = true;
+            }
+        }
+    }
+    if has_word {
+        words.push(cur);
+    }
+    words
 }
 
 /// A short, coloured word for what a rule does with what it matches.
@@ -1604,6 +1627,31 @@ mod tests {
             split_command_line("pytest -q"),
             ("pytest".to_string(), None)
         );
+        // A quoted argument is one word, exactly as the command saw it.
+        assert_eq!(
+            split_command_line(r#"sh -c "cat /tmp/x/out.txt""#),
+            ("sh".to_string(), Some("cat /tmp/x/out.txt".to_string()))
+        );
+    }
+
+    /// The scope learned from a stored command line must be the scope the
+    /// same command reports when it runs again.
+    #[test]
+    fn a_stored_command_line_round_trips_to_the_running_scope() {
+        for argv in [
+            vec!["sh", "-c", "cat /tmp/some dir/out.txt"],
+            vec!["cmd", "/C", "type C:\\x\\out.txt"],
+            vec!["npm", "install", "--save-dev"],
+            vec!["C:\\Program Files\\nodejs\\npm.exe", "ci"],
+        ] {
+            let ctx = ttk_compilers::CommandContext {
+                argv: argv.iter().map(|s| s.to_string()).collect(),
+                ..Default::default()
+            };
+            let (program, sub) = split_command_line(&ctx.command_line());
+            assert_eq!(Some(program), ctx.program(), "{argv:?}");
+            assert_eq!(sub.as_deref(), ctx.subcommand(), "{argv:?}");
+        }
     }
 
     #[test]

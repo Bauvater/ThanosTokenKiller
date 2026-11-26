@@ -177,15 +177,11 @@ pub fn scan(
 
 /// `"npm install --save"` → the scope a rule about it would have.
 fn scope_of(command_line: &str) -> Scope {
-    let (first, rest) = match command_line.strip_prefix('"') {
-        Some(r) => r.split_once('"').unwrap_or((r, "")),
-        None => command_line
-            .split_once(char::is_whitespace)
-            .unwrap_or((command_line, "")),
-    };
-    match rest.split_whitespace().find(|a| !a.starts_with('-')) {
-        Some(sub) => Scope::command(first, sub),
-        None => Scope::program(first),
+    // One parser for stored command lines, shared with `ttk learn`, so a
+    // suggestion's scope is exactly the scope a lesson would get.
+    match crate::learncmd::split_command_line(command_line) {
+        (program, Some(sub)) => Scope::command(program, sub),
+        (program, None) => Scope::program(program),
     }
 }
 
