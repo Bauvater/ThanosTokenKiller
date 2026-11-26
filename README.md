@@ -1,6 +1,6 @@
 <div align="center">
 
-# 🔪 ThanosTokenKiller
+# 🔪 ThanosTokenKiller - Self-improving Token Killer
 
 **Shrinks what your coding agent reads — tests, builds, git, logs —<br>
 and keeps every byte of the original one command away.**
@@ -343,7 +343,8 @@ An install does three things:
 | Hook | What ttk does |
 |---|---|
 | `PostToolUse` (Bash, PowerShell) | compiles the output *before the model sees it* and returns the compiled view; outputs under ~200 tokens pass through untouched; suggests teaching a filter when a large output was barely reduced |
-| `SessionStart` (startup, resume, clear, **compact**) | injects the core rules, so they survive context compaction |
+| `SessionStart` (startup, resume, clear, **compact**) | injects the core rules, so they survive context compaction, plus any pending filter reminders |
+| `UserPromptSubmit` | reminds the agent of noisy commands of this session that no filter covers yet, with the capsule to teach from (at most 3 times per command) |
 | `SubagentStart` | injects the core rules into every subagent |
 | `Stop`, `SubagentStop`, `SessionEnd` | imports the provider's measured usage |
 

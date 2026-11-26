@@ -2131,3 +2131,87 @@ fn an_upgrade_adds_the_hooks_and_uninstall_removes_everything_of_ttks() {
         "the rule file is removed too"
     );
 }
+
+/// A barely filtered output is hinted once, then brought up again with later
+/// prompts (bounded), again after a compaction, and never once a rule covers
+/// the command — with the capsule, so the lesson does not need the output to
+/// still be in the agent's context.
+#[test]
+fn teaching_reminders_follow_the_agent_until_a_rule_exists() {
+    let s = Sandbox::new();
+    let cwd = s.dir.path().display().to_string();
+    let mut noisy = String::new();
+    for i in 0..400 {
+        noisy.push_str(&format!(
+            "npm WARN deprecated package-{i}@1.{i}.0: this version is no longer maintained\n"
+        ));
+    }
+    noisy.push_str("added 412 packages in 9s\n");
+
+    let post = post_tool_use(&s, "toolu_R", "npm install", &noisy);
+    let reply: serde_json::Value =
+        serde_json::from_str(&stdout(&s.ttk_stdin(&["hook"], &post.to_string()))).expect("json");
+    let hint = reply["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .unwrap_or_default();
+    assert!(hint.contains("little was filtered"), "{reply}");
+
+    let prompt = serde_json::json!({
+        "hook_event_name": "UserPromptSubmit", "session_id": "sess-1", "cwd": cwd, "prompt": "go on",
+    });
+    let remind = || -> String {
+        let o = s.ttk_stdin(&["hook"], &prompt.to_string());
+        let out = stdout(&o);
+        if out.trim().is_empty() {
+            return String::new();
+        }
+        let v: serde_json::Value = serde_json::from_str(&out).expect("json");
+        v["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string()
+    };
+    let first = remind();
+    assert!(first.contains("`npm install`"), "{first}");
+    assert!(first.contains("ttk learn --capsule cap://"), "{first}");
+    assert!(!remind().is_empty());
+    assert!(!remind().is_empty());
+    assert!(remind().is_empty(), "three reminders, then quiet");
+
+    // A compaction wipes the agent's memory of them: start over.
+    let compact = serde_json::json!({
+        "hook_event_name": "SessionStart", "session_id": "sess-1", "cwd": cwd, "source": "compact",
+    });
+    let o = s.ttk_stdin(&["hook"], &compact.to_string());
+    let v: serde_json::Value = serde_json::from_str(&stdout(&o)).expect("json");
+    let ctx = v["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .unwrap_or_default();
+    assert!(
+        ctx.contains("ttk reminder") && ctx.contains("npm install"),
+        "{ctx}"
+    );
+
+    // Once a rule covers the command, the reminders stop for good.
+    let lesson = s.write(
+        "lesson.txt",
+        "<filter-trash>\nnpm WARN deprecated package-1@1.1.0: this version is no longer maintained\n\
+         </filter-trash>\nadded 412 packages in 9s\n",
+    );
+    let o = s.ttk(&[
+        "learn",
+        "--file",
+        &path_arg(&lesson),
+        "--scope",
+        "npm install",
+    ]);
+    assert!(o.status.success(), "{}", stderr(&o));
+    assert!(remind().is_empty(), "covered by a rule now");
+
+    // Every reminder is booked as overhead, never silently free.
+    let g = s.gain_json();
+    assert!(
+        g["overhead_by_cause"]["hint"].as_u64().unwrap_or(0) > 0,
+        "{g}"
+    );
+}

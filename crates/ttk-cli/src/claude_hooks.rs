@@ -13,9 +13,10 @@ use serde_json::{Map, Value, json};
 use ttk_core::{Error, Result};
 
 /// The events ttk registers for, with their matcher and timeout (seconds).
-pub const EVENTS: [(&str, Option<&str>, u64); 6] = [
+pub const EVENTS: [(&str, Option<&str>, u64); 7] = [
     ("PostToolUse", Some("Bash|PowerShell"), 30),
     ("SessionStart", None, 10),
+    ("UserPromptSubmit", None, 10),
     ("SubagentStart", None, 10),
     ("Stop", None, 15),
     ("SubagentStop", None, 15),

@@ -12,8 +12,11 @@ the main agent and to every subagent.
    `ttk search <cap> "text"`, `ttk retrieve <cap> --level 4` (all).
 2. `[repeat]`/`[delta]` = same as an earlier run; errors are always repeated.
 3. Fields ending in `_not_shown` say exactly what was left out.
-4. When output contained noise you will see again, teach a filter (rule 6 in
-   ttk.md); improve an existing rule rather than adding a near-duplicate.
+4. **Teach filters immediately.** When an output contained noise you will see
+   again, teach a filter right away (`ttk learn --last`, ttk.md §4), before it
+   leaves your context. A `ttk reminder` names a capsule: teach from it with
+   `ttk learn --capsule <cap>`. Improve an existing rule rather than adding a
+   near-duplicate.
 5. Never filter errors, warnings, test results, stack traces or exit codes. If
    unsure, keep the line — or read the original.
 6. `<secret:…>` placeholders are redacted credentials: never unmask them.
@@ -77,6 +80,11 @@ You are responsible for keeping recurring noise out of the context:
 5. A filter costs tokens to teach. Only teach noise that will recur; ttk tracks
    each rule's net saving (saved − teaching cost) and flags negative ones.
 6. A hint like `ttk: … little was filtered` is ttk asking you to do step 1.
+   If you skip it, `ttk reminder` brings the command up again with later
+   prompts and after a context compaction, naming the capsule that holds the
+   original: `ttk retrieve <cap> --level 4` to look at it again, then
+   `ttk learn --capsule <cap>` with the noise marked. The reminders stop once a
+   rule covers the command.
 
 ## 5. Maintenance
 

@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.2.2 — 2026-11-26
+
+### Added
+
+- **Automatic capsule garbage collection.** Every capture checks a stamp file
+  (one `metadata` call); at most every `capsules.auto_gc_hours` (default 6) the
+  store drops expired capsules, evicts the oldest until it fits
+  `capsules.max_storage_gb`, and deletes per-session event logs older than
+  `capsules.events_ttl_days` (default 90). `ttk doctor` shows the schedule and
+  the last run. The default size limit drops from 20 GB to 2 GB per workspace,
+  since the hook now stores every sizeable output.
+- **Teaching reminders that survive context loss.** A barely filtered output is
+  remembered per session with its capsule. Until a rule covers the command, a
+  new `UserPromptSubmit` hook reminds the agent with the next prompts (at most
+  `hooks.hint_reminders`, default 3, per command) and names
+  `ttk learn --capsule <cap>`, so the lesson works even after the output left
+  the context. A compaction, resume or clear starts the reminders over and
+  injects the pending ones right away. Every reminder is booked as overhead.
+- The core rules now say plainly: teach filters immediately.
+
 ## 0.2.1 — 2026-11-26
 
 The first published release of the 0.2 line (the `v0.2.0` tag was never

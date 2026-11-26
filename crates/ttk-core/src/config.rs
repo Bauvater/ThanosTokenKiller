@@ -132,7 +132,17 @@ pub struct Config {
 #[serde(deny_unknown_fields, default)]
 pub struct CapsuleConfig {
     pub raw_ttl_days: u32,
+    /// Upper bound for one workspace's capsule store. The hook stores every
+    /// sizeable output, so this is enforced automatically (see `auto_gc_hours`).
     pub max_storage_gb: f64,
+    /// Run the garbage collector automatically at most this often (hours):
+    /// expired capsules go, then the oldest until the store fits
+    /// `max_storage_gb`. 0 switches automatic collection off.
+    pub auto_gc_hours: u32,
+    /// Per-session event logs older than this many days are deleted by the
+    /// same pass. They feed `ttk stats` for this workspace; the global ledger
+    /// that `ttk gain` reads is not affected. 0 keeps them forever.
+    pub events_ttl_days: u32,
     /// `zstd` or `none`.
     pub compression: String,
     pub compression_level: i32,
@@ -249,7 +259,9 @@ impl Default for CapsuleConfig {
     fn default() -> Self {
         Self {
             raw_ttl_days: 14,
-            max_storage_gb: 20.0,
+            max_storage_gb: 2.0,
+            auto_gc_hours: 6,
+            events_ttl_days: 90,
             compression: "zstd".to_string(),
             compression_level: 6,
             encryption: false,
@@ -300,6 +312,10 @@ pub struct HooksConfig {
     pub hints: bool,
     /// ...for outputs of at least this many tokens.
     pub hint_min_tokens: u64,
+    /// How often, per command and session, a barely filtered command is
+    /// brought up again with the next prompt while no rule covers it.
+    /// Reset after a context compaction. 0 = only the first hint.
+    pub hint_reminders: u32,
     /// Import measured provider usage from the transcript when a turn ends.
     pub import_usage: bool,
 }
@@ -313,6 +329,7 @@ impl Default for HooksConfig {
             inject_context: true,
             hints: true,
             hint_min_tokens: 1500,
+            hint_reminders: 3,
             import_usage: true,
         }
     }

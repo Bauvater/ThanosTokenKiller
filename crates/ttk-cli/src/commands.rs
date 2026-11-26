@@ -638,6 +638,24 @@ pub fn doctor(ctx: &Context) -> Result<i32> {
                     )
                 )
             );
+            let c = &config.capsules;
+            let gc = if c.auto_gc_hours == 0 {
+                ui::paint(ui::WARN, "off").to_string()
+            } else {
+                let last = std::fs::read_to_string(ws.root().join(ttk_store::GC_STAMP))
+                    .ok()
+                    .and_then(|t| t.trim().parse::<u64>().ok())
+                    .map(|at| {
+                        let hours = ttk_core::ids::now_millis().saturating_sub(at) / 3_600_000;
+                        format!("last run {hours} h ago")
+                    })
+                    .unwrap_or_else(|| "not run yet".to_string());
+                format!(
+                    "every {} h · limit {} GB · capsules {} days · events {} days · {last}",
+                    c.auto_gc_hours, c.max_storage_gb, c.raw_ttl_days, c.events_ttl_days
+                )
+            };
+            outln!("{}", ui::kv("auto gc", gc));
             outln!("{}", ui::kv("sessions", ws.events().sessions()?.len()));
 
             // Learned filters: how many rules are loaded, and are they on?

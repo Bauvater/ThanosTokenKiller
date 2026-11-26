@@ -324,6 +324,12 @@ pub fn process(
     event.estimated_tokens_after = tokens::estimate(&final_content);
     workspace.events().append(&event)?;
 
+    // Housekeeping rides along with normal work: every hook stores its
+    // output, so the store has to be bounded without anybody remembering
+    // `ttk capsule gc`. Due at most every `auto_gc_hours`; a failure here
+    // must never cost the output, so it is ignored.
+    let _ = workspace.maybe_gc(config, event.timestamp_millis);
+
     Ok(PipelineOutput {
         content: final_content,
         event,

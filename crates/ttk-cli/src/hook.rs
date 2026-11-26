@@ -71,6 +71,7 @@ pub fn handle(raw: &str) -> Result<Option<Value>> {
     match event {
         "PostToolUse" => post_tool_use(&input, &cwd, &config, &attr),
         "SessionStart" => Ok(inject(&input, &cwd, &config, &attr, "SessionStart")),
+        "UserPromptSubmit" => Ok(user_prompt(&cwd, &config, &attr)),
         "SubagentStart" => Ok(inject(&input, &cwd, &config, &attr, "SubagentStart")),
         "Stop" | "SessionEnd" => {
             import_usage(&config, input.get("transcript_path"));
@@ -207,7 +208,7 @@ fn post_tool_use(
         && before >= config.hooks.hint_min_tokens
         && (before - delivered) * 4 < before
     {
-        hint = hint_for(&ws, attr, &context, before);
+        hint = hint_for(&ws, attr, &context, before, out.capsule_ref.as_deref());
     }
     let hint_tokens = hint.as_deref().map_or(0, |h| tokens::estimate(h).value);
 
@@ -317,44 +318,175 @@ fn command_context(command: &str, cwd: &Path) -> CommandContext {
     }
 }
 
-/// One line asking the agent to teach a filter — once per command and
-/// session, and only when no rule covers the command yet.
+// ---------------------------------------------------------------------------
+// Teaching reminders
+// ---------------------------------------------------------------------------
+//
+// A hint shown once, right after a noisy output, is easy to miss and gone
+// after the next compaction. So every such output is remembered per session
+// (`.ttk/hints.json`): its scope, its size and its capsule. Until a rule
+// covers that command, the agent is reminded when the next prompt arrives —
+// with the capsule, so it can teach from the stored original even when the
+// output itself has long left its context. Bounded: at most
+// `hooks.hint_reminders` reminders per command and session, reset after a
+// compaction (the agent has forgotten the earlier ones).
+
+const HINTS_FILE: &str = "hints.json";
+const MAX_SESSIONS: usize = 50;
+
+type HintState = serde_json::Map<String, Value>;
+
+fn load_hints(ws: &Workspace) -> HintState {
+    let state: HintState = std::fs::read_to_string(ws.root().join(HINTS_FILE))
+        .ok()
+        .and_then(|t| serde_json::from_str(&t).ok())
+        .unwrap_or_default();
+    // Sessions written by 0.2.0 were plain arrays of scopes; start them over.
+    state.into_iter().filter(|(_, v)| v.is_object()).collect()
+}
+
+fn save_hints(ws: &Workspace, mut state: HintState) {
+    while state.len() > MAX_SESSIONS {
+        let Some(first) = state.keys().next().cloned() else {
+            break;
+        };
+        state.remove(&first);
+    }
+    let _ = std::fs::write(ws.root().join(HINTS_FILE), Value::Object(state).to_string());
+}
+
+fn scope_label(context: &CommandContext) -> Option<(String, Option<String>, String)> {
+    let program = context.program()?;
+    let sub = context.subcommand().map(str::to_string);
+    let label = match &sub {
+        Some(s) => format!("{program} {s}"),
+        None => program.clone(),
+    };
+    Some((program, sub, label))
+}
+
+/// The hint right after a large, barely filtered output — once per command
+/// and session; later reminders come from [`pending_reminder`].
 fn hint_for(
     ws: &Workspace,
     attr: &Attribution,
     context: &CommandContext,
     before: u64,
+    capsule: Option<&str>,
 ) -> Option<String> {
-    let program = context.program()?;
-    let scope = match context.subcommand() {
-        Some(sub) => format!("{program} {sub}"),
-        None => program.clone(),
-    };
+    let (program, sub, label) = scope_label(context)?;
     let session = attr.session.clone().unwrap_or_default();
-    let path = ws.root().join("hints.json");
-    let mut state: serde_json::Map<String, Value> = std::fs::read_to_string(&path)
-        .ok()
-        .and_then(|t| serde_json::from_str(&t).ok())
-        .unwrap_or_default();
-    let seen = state
-        .entry(session.clone())
-        .or_insert_with(|| json!([]))
-        .as_array_mut()?;
-    if seen.iter().any(|v| v.as_str() == Some(scope.as_str())) {
+    let mut state = load_hints(ws);
+    let entries = state
+        .entry(session)
+        .or_insert_with(|| json!({}))
+        .as_object_mut()?;
+    if entries.contains_key(&label) {
+        // Remember the newest capsule: it is what a later lesson should use.
+        if let Some(e) = entries.get_mut(&label).and_then(Value::as_object_mut) {
+            e.insert("capsule".into(), json!(capsule));
+            e.insert("tokens".into(), json!(before));
+        }
+        save_hints(ws, state);
         return None;
     }
-    seen.push(json!(scope));
-    // Keep the file small: the newest 50 sessions.
-    while state.len() > 50 {
-        let first = state.keys().next().cloned()?;
-        state.remove(&first);
-    }
-    let _ = std::fs::write(&path, Value::Object(state).to_string());
+    entries.insert(
+        label.clone(),
+        json!({"program": program, "sub": sub, "tokens": before, "capsule": capsule, "reminders": 0}),
+    );
+    save_hints(ws, state);
     Some(format!(
-        "ttk: `{scope}` printed ~{before} tokens and little was filtered. If part of it is \
-         noise you will see again, teach a filter: `ttk learn --last` with that noise in \
-         <filter-trash> (see ttk.md §4). Ignore if it was all relevant."
+        "ttk: `{label}` printed ~{before} tokens and little was filtered. If any of it is noise \
+         you will see again (progress, banners, download or deprecation spam), teach a filter \
+         NOW, while the output is still in front of you: `ttk learn --last` with the noise \
+         wrapped in <filter-trash> and the rest pasted back unmarked (ttk.md §4). Errors, \
+         warnings and results are never noise. Skip it if everything was relevant."
     ))
+}
+
+/// Commands of this session that were hinted, are still uncovered by any
+/// rule, and have reminders left. Increments their counters.
+fn pending_reminder(ws: &Workspace, config: &Config, attr: &Attribution) -> Option<String> {
+    let session = attr.session.clone()?;
+    let mut state = load_hints(ws);
+    let entries = state.get_mut(&session)?.as_object_mut()?;
+    let rules = ttk_learn::Layered::load(ws.root()).ok();
+    let mut lines = Vec::new();
+    for (label, e) in entries.iter_mut() {
+        let Some(e) = e.as_object_mut() else { continue };
+        let reminders = e.get("reminders").and_then(Value::as_u64).unwrap_or(0);
+        if reminders >= u64::from(config.hooks.hint_reminders) {
+            continue;
+        }
+        let program = e.get("program").and_then(Value::as_str);
+        let sub = e.get("sub").and_then(Value::as_str);
+        // Any enabled rule for this command counts, whatever its condition:
+        // the agent has acted on it.
+        let covered = rules.as_ref().is_some_and(|r| {
+            r.merged
+                .applicable(program, sub)
+                .iter()
+                .any(|rule| !rule.is_keep())
+        });
+        if covered {
+            continue;
+        }
+        e.insert("reminders".into(), json!(reminders + 1));
+        let tokens = e.get("tokens").and_then(Value::as_u64).unwrap_or(0);
+        let how = match e.get("capsule").and_then(Value::as_str) {
+            Some(cap) => {
+                format!("`ttk retrieve {cap} --level 4`, then `ttk learn --capsule {cap}`")
+            }
+            None => "`ttk learn`".to_string(),
+        };
+        lines.push(format!("`{label}` (~{tokens} tokens): {how}"));
+        if lines.len() == 3 {
+            break;
+        }
+    }
+    if lines.is_empty() {
+        return None;
+    }
+    save_hints(ws, state);
+    Some(format!(
+        "ttk reminder: these commands of this session were barely filtered and no filter covers \
+         them yet. If their output had recurring noise, teach a filter now (the original is \
+         stored even if it has left your context):\n- {}",
+        lines.join("\n- ")
+    ))
+}
+
+/// After a compaction the agent has forgotten every earlier reminder.
+fn reset_reminders(ws: &Workspace, attr: &Attribution) {
+    let Some(session) = attr.session.clone() else {
+        return;
+    };
+    let mut state = load_hints(ws);
+    let Some(entries) = state.get_mut(&session).and_then(Value::as_object_mut) else {
+        return;
+    };
+    for e in entries.values_mut() {
+        if let Some(e) = e.as_object_mut() {
+            e.insert("reminders".into(), json!(0));
+        }
+    }
+    save_hints(ws, state);
+}
+
+/// `UserPromptSubmit`: remind, if anything is pending.
+fn user_prompt(cwd: &Path, config: &Config, attr: &Attribution) -> Option<Value> {
+    if !config.hooks.hints || config.hooks.hint_reminders == 0 {
+        return None;
+    }
+    let ws = Workspace::open(cwd, config).ok()?;
+    let text = pending_reminder(&ws, config, attr)?;
+    attribution::record_overhead(attr, cwd, tokens::estimate(&text).value, "hint", None);
+    Some(json!({
+        "hookSpecificOutput": {
+            "hookEventName": "UserPromptSubmit",
+            "additionalContext": text,
+        }
+    }))
 }
 
 // ---------------------------------------------------------------------------
@@ -371,9 +503,24 @@ fn inject(
     if !config.hooks.inject_context {
         return None;
     }
-    let text = crate::guide::agent_context();
-    let tokens = tokens::estimate(&text).value;
+    let mut text = crate::guide::agent_context();
     let source = str_field(input, "source").unwrap_or_else(|| "subagent".to_string());
+    // After a compaction, resume or clear the agent has lost every earlier
+    // hint: start the reminders over and bring the pending ones up now.
+    if event == "SessionStart"
+        && matches!(source.as_str(), "compact" | "resume" | "clear")
+        && config.hooks.hints
+        && let Ok(ws) = Workspace::open(cwd, config)
+    {
+        reset_reminders(&ws, attr);
+        if config.hooks.hint_reminders > 0
+            && let Some(pending) = pending_reminder(&ws, config, attr)
+        {
+            text.push_str("\n\n");
+            text.push_str(&pending);
+        }
+    }
+    let tokens = tokens::estimate(&text).value;
     // One injection per session/agent/source/second: Claude Code runs an
     // identical hook registered twice only once, but be safe.
     let id = format!(
