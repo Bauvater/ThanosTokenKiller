@@ -158,7 +158,7 @@ pub fn versions(path: &Path) -> Result<Vec<Version>> {
     // order they were really taken.
     entries.retain(|e| dir.join(format!("{}.json", e.id)).is_file());
     entries.reverse();
-    entries.sort_by(|a, b| b.at_millis.cmp(&a.at_millis));
+    entries.sort_by_key(|e| std::cmp::Reverse(e.at_millis));
     Ok(entries
         .into_iter()
         .map(|e| Version {

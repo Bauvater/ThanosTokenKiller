@@ -27,7 +27,16 @@ jobs:
         run: cargo fmt --all --check
       - name: clippy
         run: cargo clippy --all-targets --all-features
+      # Failures are also raised as annotations: those are readable on the
+      # run page and through the API without access to the full log.
       - name: test
-        run: cargo test --all-features
+        shell: bash
+        run: |
+          set -o pipefail
+          if ! cargo test --all-features 2>&1 | tee test.log; then
+            grep -E "panicked at|^test .* FAILED|^error(\[|:)|assertion|left:|right:" test.log \
+              | head -40 | while IFS= read -r line; do echo "::error::${line}"; done
+            exit 1
+          fi
       - name: release build
         run: cargo build --release
