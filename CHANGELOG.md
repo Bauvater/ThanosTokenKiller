@@ -1,5 +1,35 @@
 # Changelog
 
+## 0.2.1 — 2026-11-26
+
+The first published release of the 0.2 line (the `v0.2.0` tag was never
+released: its Linux build failed).
+
+### Fixed
+
+- **Learned rules never fired for quoted commands** (pre-existing, Linux CI
+  red since 0.1): the scope of a lesson was read from the stored command line
+  by splitting on whitespace, so `sh -c "cat out.txt"` was scoped to `"cat`
+  while the running command reports `cat out.txt`. Stored command lines are
+  now split quote-aware, shared by `ttk learn` and `ttk suggest`.
+- **`shell.grep` silently dropped lines** it could not parse (context lines
+  from `grep -A`, matches without a path) and files beyond its cap. They are
+  now kept in an `other` section, or reported as `files_not_shown`.
+- `ttk.md` is embedded with normalised line endings, so installs stay
+  idempotent regardless of Git's CRLF conversion.
+- Clippy on Rust 1.100.
+
+### Installer
+
+- An upgrade also registers the Claude Code hooks (pointed at the newly
+  installed binary); `ttk dashboard` is on the closing card.
+- Uninstalling removes ttk's hooks, instruction blocks and `ttk.md`, so no
+  hook is left pointing at a deleted binary.
+
+### CI
+
+- Test failures are raised as annotations, readable without the full log.
+
 ## 0.2.0 — 2026-11-25
 
 A ground-up rework of enforcement, token accounting, the filter system and the

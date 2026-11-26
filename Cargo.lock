@@ -647,7 +647,7 @@ checksum = "7d56353a2a665ad0f41a421187180aab746c8c325620617ad883a99a1cbe66d2"
 
 [[package]]
 name = "ttk-cli"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anstream",
  "anstyle",
@@ -665,7 +665,7 @@ dependencies = [
 
 [[package]]
 name = "ttk-compilers"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "regex",
  "serde",
@@ -675,7 +675,7 @@ dependencies = [
 
 [[package]]
 name = "ttk-core"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "blake3",
  "dirs",
@@ -690,7 +690,7 @@ dependencies = [
 
 [[package]]
 name = "ttk-installer"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anstream",
  "anstyle",
@@ -698,7 +698,7 @@ dependencies = [
 
 [[package]]
 name = "ttk-learn"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "blake3",
  "serde",
@@ -709,7 +709,7 @@ dependencies = [
 
 [[package]]
 name = "ttk-store"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "blake3",
  "redb",
