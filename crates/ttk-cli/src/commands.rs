@@ -196,6 +196,11 @@ pub fn installer_hook(action: InstallerHook) -> Result<i32> {
                 outln!("{}\t{}", action.as_str(), path.display());
             }
         }
+        InstallerHook::RemoveAgents => {
+            for (path, action) in crate::install::remove_installed(false)? {
+                outln!("{}\t{}", action.as_str(), path.display());
+            }
+        }
     }
     Ok(0)
 }
@@ -206,6 +211,7 @@ pub enum InstallerHook {
     PathRemove,
     TakeOver,
     RefreshAgents,
+    RemoveAgents,
 }
 
 /// Write the agent instruction block into `CLAUDE.md` / `AGENTS.md`.
@@ -1416,7 +1422,7 @@ pub fn guide(core: bool) -> Result<i32> {
     if core {
         outln!("{}", crate::guide::agent_context());
     } else {
-        out!("{}", crate::guide::TTK_MD);
+        out!("{}", crate::guide::ttk_md());
     }
     Ok(0)
 }

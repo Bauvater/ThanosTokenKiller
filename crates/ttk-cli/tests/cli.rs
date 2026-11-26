@@ -2077,3 +2077,52 @@ fn rule_changes_are_versioned_and_restorable() {
     let audit = s.ttk(&["rules", "audit", "--json"]);
     assert!(audit.status.success(), "{}", stderr(&audit));
 }
+
+/// Upgrading from 0.1 (a block, no hooks) brings the hooks along, and the
+/// uninstaller takes every trace out again — leaving the user's own text,
+/// settings and other hooks exactly as they were.
+#[test]
+fn an_upgrade_adds_the_hooks_and_uninstall_removes_everything_of_ttks() {
+    let s = Sandbox::new();
+    let claude_dir = s.dir.path().join("agent-home").join(".claude");
+    std::fs::create_dir_all(&claude_dir).expect("mkdir");
+    let md = claude_dir.join("CLAUDE.md");
+    std::fs::write(
+        &md,
+        "# mine\n\n<!-- BEGIN ThanosTokenKiller (ttk) — managed block, do not edit by hand -->\n\
+         ## ThanosTokenKiller (`ttk`)\nold\n<!-- END ThanosTokenKiller (ttk) -->\n",
+    )
+    .expect("write");
+    let settings = claude_dir.join("settings.json");
+    std::fs::write(
+        &settings,
+        r#"{"model":"opus","hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"rtk hook claude"}]}]}}"#,
+    )
+    .expect("write");
+
+    let o = s.ttk(&["__installer", "refresh-agents"]);
+    assert!(o.status.success(), "{}", stderr(&o));
+    assert!(stdout(&o).contains("hooks installed"), "{}", stdout(&o));
+    let text = std::fs::read_to_string(&settings).expect("settings");
+    assert!(text.contains(" hook\""), "{text}");
+    assert!(claude_dir.join("ttk.md").is_file());
+
+    let o = s.ttk(&["__installer", "remove-agents"]);
+    assert!(o.status.success(), "{}", stderr(&o));
+    let v: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&settings).expect("settings")).expect("json");
+    assert_eq!(
+        v,
+        serde_json::json!({"model":"opus","hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"rtk hook claude"}]}]}}),
+        "only ttk's hooks are gone"
+    );
+    let md_text = std::fs::read_to_string(&md).expect("md");
+    assert!(
+        md_text.contains("# mine") && !md_text.contains("ThanosTokenKiller"),
+        "{md_text}"
+    );
+    assert!(
+        !claude_dir.join("ttk.md").exists(),
+        "the rule file is removed too"
+    );
+}

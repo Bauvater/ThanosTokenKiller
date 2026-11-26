@@ -162,3 +162,39 @@ fn a_panicking_compiler_does_not_stop_the_registry() {
     .expect_err("must produce a fallback");
     assert_eq!(verdict.output, "original text");
 }
+
+/// Regression: grep output with lines that are not `path:line:content`
+/// (context lines from `-A`, a second grep without paths) lost those lines
+/// silently. Every non-empty line must survive the compiled view, or the
+/// compiler must decline.
+#[test]
+fn grep_never_drops_lines_it_cannot_parse() {
+    let config = cfg(Mode::Safe);
+    let input = "\
+src/a.rs:10:fn one() {}
+src/a.rs:11-    let context_line = 1;
+src/a.rs:20:fn two() {}
+src/a.rs:30:fn three() {}
+src/b.rs:5:fn four() {}
+src/b.rs:9:fn five() {}
+7:a match from a single-file grep without a path
+";
+    let grep = CommandContext {
+        argv: vec!["grep".into(), "-rn".into(), "fn".into()],
+        ..ctx()
+    };
+    let ci = CompileInput::new(input, &config).command(&grep);
+    if let Some(candidate) = compile(&ci) {
+        for needle in [
+            "let context_line = 1;",
+            "a match from a single-file grep without a path",
+            "fn five",
+        ] {
+            assert!(
+                candidate.output.contains(needle),
+                "`{needle}` was dropped:\n{}",
+                candidate.output
+            );
+        }
+    }
+}

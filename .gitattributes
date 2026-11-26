@@ -1,2 +1,4 @@
 # Auto detect text files and perform LF normalization
 * text=auto
+# Embedded into the binary and compared byte for byte on install.
+ttk.md text eol=lf

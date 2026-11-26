@@ -44,7 +44,16 @@ through the CLI. They are single measurements, not a benchmark suite.";
 /// It is written next to every instruction file `ttk install` touches, and
 /// `ttk guide` prints it. One file, one source of truth: the CLAUDE.md block,
 /// the AGENTS.md block and the hook's injected context are all derived from it.
-pub const TTK_MD: &str = include_str!("../../../ttk.md");
+const TTK_MD_RAW: &str = include_str!("../../../ttk.md");
+
+/// `ttk.md` with `\n` line endings, whatever the checkout used: the text is
+/// compared byte for byte on every install, so it must not depend on Git's
+/// line ending conversion.
+pub fn ttk_md() -> &'static str {
+    static NORMALISED: std::sync::LazyLock<String> =
+        std::sync::LazyLock::new(|| TTK_MD_RAW.replace("\r\n", "\n"));
+    NORMALISED.as_str()
+}
 
 /// File name of the rule file beside an instruction file.
 pub const TTK_MD_FILE: &str = "ttk.md";
@@ -53,9 +62,9 @@ pub const TTK_MD_FILE: &str = "ttk.md";
 pub fn core_rules() -> &'static str {
     let begin = "<!-- ttk:core -->";
     let end = "<!-- /ttk:core -->";
-    match (TTK_MD.find(begin), TTK_MD.find(end)) {
-        (Some(b), Some(e)) if b < e => TTK_MD[b + begin.len()..e].trim(),
-        _ => TTK_MD,
+    match (ttk_md().find(begin), ttk_md().find(end)) {
+        (Some(b), Some(e)) if b < e => ttk_md()[b + begin.len()..e].trim(),
+        _ => ttk_md(),
     }
 }
 
@@ -109,7 +118,7 @@ pub fn agent_block(agent: Agent) -> String {
             "## ThanosTokenKiller (`ttk`) — mandatory\n\n\
              Every agent and subagent MUST follow these rules (also in `{TTK_MD_FILE}`). \
              Prefix shell commands with long output with `ttk run --`.\n\n{}\n",
-            TTK_MD.trim()
+            ttk_md().trim()
         ),
     }
 }
@@ -465,7 +474,7 @@ mod tests {
             "--when success",
             "subagent",
         ] {
-            assert!(TTK_MD.contains(needle), "ttk.md is missing `{needle}`");
+            assert!(ttk_md().contains(needle), "ttk.md is missing `{needle}`");
         }
     }
 
@@ -475,14 +484,14 @@ mod tests {
         assert!(core.contains("cap://"));
         assert!(core.contains("ttk retrieve"));
         assert!(!core.contains("ttk:core"), "markers are stripped");
-        assert!(core.len() * 3 < TTK_MD.len());
+        assert!(core.len() * 3 < ttk_md().len());
         assert!(agent_context().contains("ttk guide"));
     }
 
     #[test]
     fn codex_gets_the_rules_inline_because_it_has_no_imports() {
         let full = agent_block(Agent::Codex);
-        assert!(full.contains(TTK_MD.trim()));
+        assert!(full.contains(ttk_md().trim()));
         let compact = agent_block_compact(Agent::Codex);
         assert!(compact.contains(core_rules()));
         assert!(compact.len() * 2 < full.len());

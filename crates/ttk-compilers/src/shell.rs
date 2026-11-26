@@ -47,7 +47,7 @@ impl Compiler for GrepCompiler {
     }
 
     fn version(&self) -> u32 {
-        1
+        2
     }
 
     fn detect(&self, input: &CompileInput<'_>) -> bool {
@@ -75,9 +75,20 @@ impl Compiler for GrepCompiler {
     fn compile(&self, input: &CompileInput<'_>) -> Option<Candidate> {
         let mut files: Vec<FileMatches> = Vec::new();
         let mut total = 0usize;
+        // Lines that are not `path:line:content` — context lines from `-A`/`-B`
+        // (`path-12-…`), single-file output without a path, `--` separators,
+        // error messages. They are kept verbatim: dropping them silently was
+        // a loss nobody could see.
+        let mut other: Vec<String> = Vec::new();
+        // Matches in files beyond MAX_FILES, reported as not shown.
+        let mut files_not_shown = 0usize;
+        let mut matches_in_hidden_files = 0usize;
 
         for line in lines_capped(input.content, MAX_LINES) {
             let Some(caps) = GREP_RE.captures(line) else {
+                if !line.trim().is_empty() && line.trim() != "--" {
+                    other.push(line.to_string());
+                }
                 continue;
             };
             total += 1;
@@ -99,6 +110,9 @@ impl Compiler for GrepCompiler {
                             matches: vec![(lineno, content)],
                             dropped: 0,
                         });
+                    } else {
+                        files_not_shown += 1;
+                        matches_in_hidden_files += 1;
                     }
                 }
             }
@@ -109,11 +123,22 @@ impl Compiler for GrepCompiler {
         if files.is_empty() || total < 3 || total < files.len() * 2 {
             return None;
         }
+        // Mostly not grep-shaped (e.g. `grep -A` with long context): grouping
+        // the few matching lines would rearrange the output more than it
+        // shrinks it. Leave it to other compilers or the original.
+        if other.len() > total {
+            return None;
+        }
 
         let mut doc = IrDoc::new("shell")
             .variant("grep")
             .head("matches", total.to_string())
             .field_num("files", files.len());
+        if files_not_shown > 0 {
+            doc = doc
+                .field_num("files_not_shown", files_not_shown)
+                .field_num("matches_not_shown", matches_in_hidden_files);
+        }
         let mut invariants = Vec::new();
         let mut dropped_any = false;
         for f in &files {
@@ -124,6 +149,13 @@ impl Compiler for GrepCompiler {
             }
             for (lineno, content) in &f.matches {
                 sec = sec.line(format!("{lineno}: {}", clip(content.trim_end(), 300)));
+            }
+            doc = doc.section(sec);
+        }
+        if !other.is_empty() {
+            let mut sec = IrSection::new("other").attr("n", other.len().to_string());
+            for l in &other {
+                sec = sec.line(clip(l.trim_end(), 300));
             }
             doc = doc.section(sec);
         }
@@ -141,7 +173,7 @@ impl Compiler for GrepCompiler {
             Candidate::new(self.id(), self.version(), doc.render())
                 .invariants(invariants)
                 .reparse(Reparse::TokenIr)
-                .lossy(dropped_any)
+                .lossy(dropped_any || files_not_shown > 0)
                 .note("matches grouped by file"),
         )
     }

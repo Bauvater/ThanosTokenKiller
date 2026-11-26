@@ -385,13 +385,20 @@ fn install(args: &Args) -> i32 {
         None => {
             say!(
                 "   {}",
-                paint(HEAD, "Teach Claude Code to route its commands through ttk?")
+                paint(HEAD, "Set up Claude Code to use ttk in every project?")
             );
             say!(
                 "   {}",
                 paint(
                     DIM,
-                    "Adds one marked block to %USERPROFILE%\\.claude\\CLAUDE.md; your own text stays."
+                    "Adds ttk.md and one marked block to %USERPROFILE%\\.claude\\CLAUDE.md, and"
+                )
+            );
+            say!(
+                "   {}",
+                paint(
+                    DIM,
+                    "registers hooks in settings.json that compile tool output. Your own text and hooks stay."
                 )
             );
             confirm("Set up Claude Code now?", true)
@@ -443,6 +450,7 @@ fn install(args: &Args) -> i32 {
         ("ttk", "what it can do"),
         ("ttk run -- git status", "any command, compact output"),
         ("ttk gain", "how many tokens you have saved, in total"),
+        ("ttk dashboard", "every statistic in your browser"),
         ("ttk global --open", "the folder with your global filters"),
     ] {
         say!(
@@ -680,8 +688,25 @@ fn uninstall(args: &Args) -> i32 {
     }
     rule();
 
-    const STEPS: usize = 4;
-    step(1, STEPS, "removing ttk from your PATH");
+    const STEPS: usize = 5;
+    step(1, STEPS, "removing Claude Code hooks and instructions");
+    if ttk.is_file() {
+        match quiet(&ttk, &["__installer", "remove-agents"]) {
+            Ok(out) if out.trim().is_empty() => skipped("none installed"),
+            Ok(out) => {
+                done(format!("{} item(s)", out.lines().count()));
+                for line in out.lines() {
+                    let shown = line.replace('\t', "  ");
+                    say!("         {} {}", paint(DIM, "└"), paint(DIM, shown));
+                }
+            }
+            Err(e) => failed(e),
+        }
+    } else {
+        skipped("ttk.exe is already gone");
+    }
+
+    step(2, STEPS, "removing ttk from your PATH");
     if ttk.is_file() {
         match quiet(&ttk, &["__installer", "path-remove"]) {
             Ok(out) => done(out.trim()),
@@ -691,7 +716,7 @@ fn uninstall(args: &Args) -> i32 {
         skipped("ttk.exe is already gone");
     }
 
-    step(2, STEPS, "removing Start menu shortcuts");
+    step(3, STEPS, "removing Start menu shortcuts");
     match start_menu_dir() {
         Some(menu) if menu.is_dir() => match std::fs::remove_dir_all(&menu) {
             Ok(()) => done("removed"),
@@ -700,7 +725,7 @@ fn uninstall(args: &Args) -> i32 {
         _ => skipped("none found"),
     }
 
-    step(3, STEPS, "unregistering from Windows");
+    step(4, STEPS, "unregistering from Windows");
     let _ = Command::new("reg")
         .args(["delete", UNINSTALL_KEY, "/f"])
         .stdout(Stdio::null())
@@ -708,7 +733,7 @@ fn uninstall(args: &Args) -> i32 {
         .status();
     done("removed from Settings → Apps");
 
-    step(4, STEPS, "deleting the program");
+    step(5, STEPS, "deleting the program");
     for name in ["ttk.exe", "ttk.exe.old", "ttk.exe.tmp"] {
         let _ = std::fs::remove_file(dir.join(name));
     }

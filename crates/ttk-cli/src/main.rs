@@ -374,6 +374,8 @@ enum InstallerAction {
     TakeOver,
     /// Update every installed agent block to this version; remove duplicates.
     RefreshAgents,
+    /// Remove ttk's global hooks, instruction blocks and rule files.
+    RemoveAgents,
 }
 
 #[derive(Subcommand)]
@@ -653,6 +655,7 @@ fn main() {
             InstallerAction::PathRemove => commands::InstallerHook::PathRemove,
             InstallerAction::TakeOver => commands::InstallerHook::TakeOver,
             InstallerAction::RefreshAgents => commands::InstallerHook::RefreshAgents,
+            InstallerAction::RemoveAgents => commands::InstallerHook::RemoveAgents,
         }),
         Command::Inspect { event } => commands::inspect(&ctx, &event),
         Command::Explain { event } => commands::explain(&ctx, &event),

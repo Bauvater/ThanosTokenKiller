@@ -101,6 +101,10 @@ pub enum Action {
     Unchanged,
     /// A second copy of the block was taken out of this file.
     DuplicateRemoved,
+    /// ttk's hooks were added to or refreshed in a settings file.
+    HooksInstalled,
+    /// ttk's block, hooks or rule file were taken out (uninstall).
+    Removed,
 }
 
 impl Action {
@@ -111,6 +115,8 @@ impl Action {
             Action::BlockUpdated => "block updated",
             Action::Unchanged => "already up to date",
             Action::DuplicateRemoved => "duplicate removed",
+            Action::HooksInstalled => "hooks installed",
+            Action::Removed => "removed",
         }
     }
 }
@@ -406,12 +412,61 @@ pub fn refresh_installed(dry_run: bool) -> Result<Vec<(PathBuf, Action)>> {
                 global: true,
             };
             out.push((path.clone(), apply(&target, &block, dry_run)?));
+            // The block now relies on the hooks doing the compiling, so an
+            // upgrade that refreshes the block registers them too — pointed
+            // at the binary doing the refresh, i.e. the one just installed.
+            if agent == Agent::ClaudeCode {
+                let settings = crate::claude_hooks::settings_path_for(path, true);
+                match crate::claude_hooks::install(
+                    &settings,
+                    &crate::claude_hooks::hook_command(),
+                    dry_run,
+                )? {
+                    crate::claude_hooks::HookAction::Unchanged => {}
+                    _ => out.push((settings, Action::HooksInstalled)),
+                }
+            }
         }
         if home_has
             && let Some(path) = &home_level
             && remove_block(path, dry_run)?
         {
             out.push((path.clone(), Action::DuplicateRemoved));
+        }
+    }
+    Ok(out)
+}
+
+/// Take every global ttk integration out: the hooks, the instruction blocks
+/// and the rule files beside them. What the uninstaller runs, so no agent is
+/// left with hooks pointing at a deleted binary or rules for a missing tool.
+pub fn remove_installed(dry_run: bool) -> Result<Vec<(PathBuf, Action)>> {
+    let mut out = Vec::new();
+    for agent in Agent::ALL {
+        let mut files: Vec<PathBuf> = agent.global_path().into_iter().collect();
+        files.extend(agent.home_level_path());
+        for path in files {
+            if agent == Agent::ClaudeCode {
+                let settings = crate::claude_hooks::settings_path_for(&path, true);
+                if crate::claude_hooks::uninstall(&settings, dry_run)?
+                    == crate::claude_hooks::HookAction::Removed
+                {
+                    out.push((settings, Action::Removed));
+                }
+            }
+            if remove_block(&path, dry_run)? {
+                out.push((path.clone(), Action::Removed));
+            }
+            let rules = path
+                .parent()
+                .map(|d| d.join(crate::guide::TTK_MD_FILE))
+                .unwrap_or_default();
+            if rules.is_file() && !has_block(&path) {
+                if !dry_run {
+                    std::fs::remove_file(&rules)?;
+                }
+                out.push((rules, Action::Removed));
+            }
         }
     }
     Ok(out)
@@ -479,7 +534,7 @@ pub fn rule_file_path(target: &Target) -> PathBuf {
 /// Write `ttk.md` next to the target if it is missing or outdated.
 pub fn write_rule_file(target: &Target) -> Result<bool> {
     let path = rule_file_path(target);
-    let want = crate::guide::TTK_MD;
+    let want = crate::guide::ttk_md();
     if std::fs::read_to_string(&path).is_ok_and(|have| have.replace("\r\n", "\n") == want) {
         return Ok(false);
     }
